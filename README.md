@@ -2,6 +2,8 @@
 
 <img src="https://github.com/alsk1992.png" width="100" align="right" />
 
+[![Telegram](https://img.shields.io/badge/Telegram-@ALSK181-blue?logo=telegram)](https://t.me/ALSK181)
+
 Track the smartest money on Polymarket. Copy trade whales. Get alpha.
 
 ![Polymarket Alpha Tracker](https://img.shields.io/badge/Polymarket-Alpha%20Tracker-00d4ff)
