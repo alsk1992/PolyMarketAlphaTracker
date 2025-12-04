@@ -121,22 +121,40 @@ function analyzePositionPatterns(positions, closedPositions) {
   return sizeRanges.map(r => ({ ...r, pct: (r.count / maxCount) * 100 }));
 }
 
+// Fetch ALL closed positions by paginating until empty
+async function fetchAllClosedPositions(address, signal) {
+  let allClosed = [];
+  let offset = 0;
+
+  while (true) {
+    const res = await fetch(`${POLYMARKET_API}/closed-positions?user=${address}&limit=100&offset=${offset}`, { signal });
+    if (!res.ok) break;
+
+    const data = await res.json();
+    if (!data || data.length === 0) break; // Stop only when empty
+
+    allClosed = [...allClosed, ...data];
+    offset += data.length;
+
+    // Safety limit to prevent infinite loops (max 10000 closed positions)
+    if (offset >= 10000) break;
+  }
+
+  return allClosed;
+}
+
 // Fetch trader data directly from Polymarket Data API
 async function fetchTraderData(address) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for larger fetches
 
   try {
-    // Fetch positions, trades, closed-positions (for wins/losses), and value in parallel
-    const [positionsRes, tradesRes, valueRes, closedRes1, closedRes2] = await Promise.all([
+    // Fetch positions, trades, and value in parallel
+    const [positionsRes, tradesRes, valueRes] = await Promise.all([
       fetch(`${POLYMARKET_API}/positions?user=${address}&limit=1000&sizeThreshold=-1`, { signal: controller.signal }),
-      fetch(`${POLYMARKET_API}/trades?user=${address}&limit=1000`, { signal: controller.signal }),
+      fetch(`${POLYMARKET_API}/trades?user=${address}&limit=2000`, { signal: controller.signal }),
       fetch(`${POLYMARKET_API}/value?user=${address}`, { signal: controller.signal }),
-      fetch(`${POLYMARKET_API}/closed-positions?user=${address}&limit=50`, { signal: controller.signal }),
-      fetch(`${POLYMARKET_API}/closed-positions?user=${address}&limit=50&offset=50`, { signal: controller.signal }),
     ]);
-
-    clearTimeout(timeoutId);
 
     if (!positionsRes.ok || !tradesRes.ok || !valueRes.ok) {
       const errorRes = [positionsRes, tradesRes, valueRes].find(r => !r.ok);
@@ -149,52 +167,42 @@ async function fetchTraderData(address) {
       valueRes.json(),
     ]);
 
-    // Fetch closed positions (may need pagination)
-    let closedPositionsRaw = [];
-    if (closedRes1.ok) {
-      const data1 = await closedRes1.json();
-      closedPositionsRaw = [...data1];
-    }
-    if (closedRes2.ok) {
-      const data2 = await closedRes2.json();
-      closedPositionsRaw = [...closedPositionsRaw, ...data2];
-    }
+    // Fetch ALL closed positions (paginate until we get everything)
+    const closedPositionsRaw = await fetchAllClosedPositions(address, controller.signal);
+
+    clearTimeout(timeoutId);
 
     // Calculate stats from positions
-    let totalRealizedPnl = 0;
-    let totalUnrealizedPnl = 0;
+    let totalPnl = 0; // Use cashPnl from API - this is the actual profit
     let wins = 0;
     let losses = 0;
     let totalVolume = 0;
     const marketTitles = new Set();
 
     // All positions with size > 0 are OPEN/ACTIVE positions
-    // redeemable just means they've won that outcome and could cash out, but they're still holding
     const openPositions = [];
 
     positions.forEach(pos => {
       const size = pos.size || 0;
       const initialValue = pos.initialValue || 0;
       const currentValue = pos.currentValue || 0;
-      const unrealizedPnl = currentValue - initialValue;
-      const pnlPercent = initialValue > 0 ? (unrealizedPnl / initialValue) * 100 : 0;
-      const isRedeemable = pos.redeemable === true;
+      const cashPnl = pos.cashPnl || 0; // This is the actual profit from API
+      const pnlPercent = initialValue > 0 ? (cashPnl / initialValue) * 100 : 0;
 
       totalVolume += Math.abs(pos.totalBought || initialValue || 0);
 
       if (size > 0.01) {
-        // Active position (still holding, whether redeemable or not)
-        totalUnrealizedPnl += unrealizedPnl;
+        // Active position - use cashPnl for profit
+        totalPnl += cashPnl;
         if (pos.title) marketTitles.add(pos.title);
         openPositions.push({
           ...pos,
           initialValue,
           currentValue,
-          unrealizedPnl,
+          unrealizedPnl: cashPnl,
           pnlPercent,
           entryPrice: pos.avgPrice || 0,
           currentPrice: pos.curPrice || 0,
-          isRedeemable, // Flag to show they could redeem if they wanted
         });
       }
     });
@@ -210,21 +218,17 @@ async function fetchTraderData(address) {
 
       const curPrice = pos.curPrice || 0;
       const totalBought = pos.totalBought || 0;
-      const realizedPnl = pos.realizedPnl || 0;
+      const realizedPnl = pos.realizedPnl || 0; // API provides correct P&L
 
       // curPrice = 1 means WON, curPrice = 0 means LOST
       const won = curPrice === 1;
       const lost = curPrice === 0;
 
-      if (won) {
-        wins++;
-        totalRealizedPnl += realizedPnl;
-      } else if (lost) {
-        losses++;
-        totalRealizedPnl -= totalBought; // Lost the entire position
-      }
-      // Skip unresolved (curPrice between 0 and 1)
+      if (won) wins++;
+      else if (lost) losses++;
 
+      // Use API's realizedPnl directly - it's already calculated correctly
+      totalPnl += realizedPnl;
       totalVolume += totalBought;
 
       closedPositions.push({
@@ -233,8 +237,8 @@ async function fetchTraderData(address) {
         conditionId: pos.conditionId,
         totalBought: totalBought,
         amountWon: won ? (totalBought + realizedPnl) : 0,
-        realizedPnl: won ? realizedPnl : -totalBought,
-        pnlPercent: totalBought > 0 ? ((won ? realizedPnl : -totalBought) / totalBought) * 100 : 0,
+        realizedPnl: realizedPnl, // Use API value directly
+        pnlPercent: totalBought > 0 ? (realizedPnl / totalBought) * 100 : 0,
         won: won,
         lost: lost,
         timestamp: pos.timestamp,
@@ -281,13 +285,34 @@ async function fetchTraderData(address) {
     // Position sizing patterns
     const positionPatterns = analyzePositionPatterns(openPositions, closedPositions);
 
-    // Total P&L (realized + unrealized)
-    const totalPnl = totalRealizedPnl + totalUnrealizedPnl;
+    // Calculate period-based P&L (1D, 1W, 1M, ALL)
+    const now = Math.floor(Date.now() / 1000);
+    const oneDayAgo = now - (1 * 24 * 60 * 60);
+    const oneWeekAgo = now - (7 * 24 * 60 * 60);
+    const oneMonthAgo = now - (30 * 24 * 60 * 60);
+
+    // Calculate P&L from closed positions by time period
+    let pnl1d = 0, pnl1w = 0, pnl1m = 0;
+
+    closedPositions.forEach(pos => {
+      const posTime = pos.timestamp || 0;
+      const pnl = pos.realizedPnl || 0;
+
+      if (posTime >= oneDayAgo) pnl1d += pnl;
+      if (posTime >= oneWeekAgo) pnl1w += pnl;
+      if (posTime >= oneMonthAgo) pnl1m += pnl;
+    });
+
+    // Also add unrealized P&L from open positions for all periods
+    const unrealizedPnl = openPositions.reduce((sum, pos) => sum + (pos.unrealizedPnl || 0), 0);
 
     return {
       found: totalPositionCount > 0 || trades.length > 0,
       pseudonym,
-      totalPnl,
+      totalPnl, // Combined P&L from open positions (cashPnl) + closed positions
+      pnl1d: pnl1d + unrealizedPnl, // 1 day includes current unrealized
+      pnl1w: pnl1w + unrealizedPnl, // 1 week includes current unrealized
+      pnl1m: pnl1m + unrealizedPnl, // 1 month includes current unrealized
       winRate: parseFloat(winRate.toFixed(1)),
       totalVolume,
       currentValue,
@@ -298,14 +323,13 @@ async function fetchTraderData(address) {
       trades: sortedTrades,
       positions: openPositions,
       closedPositions,
+      closedPositionsRaw, // Keep raw closed positions for timestamp filtering
       avgPositionSize,
       largestTrade,
       avgTradeSize,
       totalTrades: trades.length,
       activityPatterns,
       positionPatterns,
-      totalUnrealizedPnl,
-      totalRealizedPnl,
       openPositionCount: openPositions.length,
       closedPositionCount: closedPositions.length,
       error: null,
@@ -326,9 +350,13 @@ export default function PolymarketWalletTracker() {
   const [newAddress, setNewAddress] = useState('');
   const [loading, setLoading] = useState({});
   const [toast, setToast] = useState(null);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true); // Auto-refresh ON by default
   const [error, setError] = useState({});
   const [activeTab, setActiveTab] = useState('overview');
+  const [pnlPeriod, setPnlPeriod] = useState('all'); // 1d, 1w, 1m, all
+  const [lastTradeTimestamps, setLastTradeTimestamps] = useState({}); // Track latest trade per wallet
+  const [newTrades, setNewTrades] = useState([]); // Track new trades for highlighting
+  const [isRefreshing, setIsRefreshing] = useState(false); // For subtle background refresh indicator
 
   // Load watchlist from localStorage on mount
   useEffect(() => {
@@ -358,13 +386,17 @@ export default function PolymarketWalletTracker() {
     }
   }, [watchlist]);
 
-  const fetchUserData = useCallback(async (address) => {
-    setLoading(prev => ({ ...prev, [address]: true }));
+  // isBackground = true means silent refresh (no loading spinner)
+  const fetchUserData = useCallback(async (address, isBackground = false) => {
+    // Only show loading spinner for initial loads, not background refreshes
+    if (!isBackground) {
+      setLoading(prev => ({ ...prev, [address]: true }));
+    }
     setError(prev => ({ ...prev, [address]: null }));
-    
+
     try {
       const result = await fetchTraderData(address);
-      
+
       if (!result.found && result.error) {
         throw new Error(result.error);
       }
@@ -374,6 +406,9 @@ export default function PolymarketWalletTracker() {
         pseudonym: result.pseudonym,
         stats: {
           totalPnl: result.totalPnl || 0,
+          pnl1d: result.pnl1d || 0,
+          pnl1w: result.pnl1w || 0,
+          pnl1m: result.pnl1m || 0,
           winRate: result.winRate || 0,
           totalVolume: result.totalVolume || 0,
           currentValue: result.currentValue || 0,
@@ -384,8 +419,6 @@ export default function PolymarketWalletTracker() {
           largestTrade: result.largestTrade || 0,
           avgTradeSize: result.avgTradeSize || 0,
           totalTrades: result.totalTrades || 0,
-          totalUnrealizedPnl: result.totalUnrealizedPnl || 0,
-          totalRealizedPnl: result.totalRealizedPnl || 0,
           openPositionCount: result.openPositionCount || 0,
           closedPositionCount: result.closedPositionCount || 0,
         },
@@ -398,23 +431,95 @@ export default function PolymarketWalletTracker() {
         lastUpdated: Date.now(),
       };
 
+      // Check for new trades
+      const prevData = walletData[address];
+      const prevLatestTimestamp = lastTradeTimestamps[address] || 0;
+      const newLatestTimestamp = data.trades[0]?.timestamp || 0;
+
+      if (prevData && newLatestTimestamp > prevLatestTimestamp) {
+        // Find new trades
+        const newTradesList = data.trades.filter(t => t.timestamp > prevLatestTimestamp);
+        if (newTradesList.length > 0) {
+          const wallet = watchlist.find(w => w.address === address);
+          const walletName = wallet?.nickname || data.pseudonym || truncateAddress(address);
+
+          // Add to new trades list for highlighting
+          setNewTrades(prev => [
+            ...newTradesList.map(t => ({ ...t, walletAddress: address, walletName, isNew: true })),
+            ...prev
+          ].slice(0, 50)); // Keep last 50 new trades
+
+          // Show notification
+          const trade = newTradesList[0];
+          setToast({
+            message: `🔔 ${walletName} ${trade.side} ${formatUSD(trade.usdValue || 0)} on ${trade.title?.slice(0, 30)}...`,
+            type: 'info'
+          });
+          setTimeout(() => setToast(null), 5000);
+
+          // Play sound (optional)
+          try {
+            const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdH2Onp2ciHlxaW1tfIeQkI2Id3Nyd3+FgoKAf35+fX19fX19');
+            audio.volume = 0.3;
+            audio.play().catch(() => {});
+          } catch (e) {}
+        }
+      }
+
+      // Update last trade timestamp
+      setLastTradeTimestamps(prev => ({ ...prev, [address]: newLatestTimestamp }));
+
       setWalletData(prev => ({ ...prev, [address]: data }));
-      setToast({ message: `✓ Loaded data for ${truncateAddress(address)}`, type: 'success' });
-      setTimeout(() => setToast(null), 3000);
 
     } catch (err) {
       console.error('Failed to fetch:', err);
-      setError(prev => ({ ...prev, [address]: err.message || 'Failed to load trader data' }));
-      setToast({ message: `Failed to load: ${err.message}`, type: 'error' });
-      setTimeout(() => setToast(null), 4000);
+      // Only show error for non-background fetches
+      if (!isBackground) {
+        setError(prev => ({ ...prev, [address]: err.message || 'Failed to load trader data' }));
+        setToast({ message: `Failed to load: ${err.message}`, type: 'error' });
+        setTimeout(() => setToast(null), 4000);
+      }
     } finally {
-      setLoading(prev => ({ ...prev, [address]: false }));
+      if (!isBackground) {
+        setLoading(prev => ({ ...prev, [address]: false }));
+      }
     }
   }, []);
 
+  // Manual refresh (shows loading spinner)
   const refreshAll = useCallback(() => {
-    watchlist.forEach(w => fetchUserData(w.address));
+    watchlist.forEach(w => fetchUserData(w.address, false));
   }, [watchlist, fetchUserData]);
+
+  // Background refresh (silent, no loading spinner, just subtle indicator)
+  const refreshAllBackground = useCallback(async () => {
+    setIsRefreshing(true);
+    await Promise.all(watchlist.map(w => fetchUserData(w.address, true)));
+    setIsRefreshing(false);
+  }, [watchlist, fetchUserData]);
+
+  // Initial fetch when watchlist loads from localStorage
+  useEffect(() => {
+    if (watchlist.length === 0) return;
+
+    // Fetch data for any wallet that doesn't have data yet
+    watchlist.forEach(w => {
+      if (!walletData[w.address] && !loading[w.address]) {
+        fetchUserData(w.address, false); // Initial load shows spinner
+      }
+    });
+  }, [watchlist]); // Only run when watchlist changes
+
+  // Auto-refresh every 30 seconds when enabled (background/silent)
+  useEffect(() => {
+    if (!autoRefresh || watchlist.length === 0) return;
+
+    const interval = setInterval(() => {
+      refreshAllBackground(); // Silent background refresh
+    }, 30000); // 30 seconds
+
+    return () => clearInterval(interval);
+  }, [autoRefresh, watchlist, refreshAllBackground]);
 
   const addWallet = () => {
     const address = newAddress.trim().toLowerCase();
@@ -541,10 +646,41 @@ export default function PolymarketWalletTracker() {
         </div>
 
         <div style={{ padding: '12px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid rgba(255, 255, 255, 0.05)' }}>
-          <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>WATCHLIST ({watchlist.length})</span>
-          <button onClick={refreshAll} disabled={isAnyLoading} style={{ padding: '6px 10px', background: 'rgba(0, 212, 255, 0.1)', border: '1px solid rgba(0, 212, 255, 0.2)', borderRadius: '6px', color: '#00d4ff', cursor: isAnyLoading ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontFamily: 'inherit' }}>
-            <RefreshIcon spinning={isAnyLoading} /> Refresh All
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)' }}>WATCHLIST ({watchlist.length})</span>
+            {autoRefresh && (
+              <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: isRefreshing ? '#00d4ff' : '#00ff88' }}>
+                <span style={{
+                  width: '6px',
+                  height: '6px',
+                  borderRadius: '50%',
+                  background: isRefreshing ? '#00d4ff' : '#00ff88',
+                  animation: isRefreshing ? 'pulse 0.5s infinite' : 'pulse 2s infinite'
+                }} />
+                {isRefreshing ? 'SYNCING' : 'LIVE'}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button
+              onClick={() => setAutoRefresh(!autoRefresh)}
+              style={{
+                padding: '6px 10px',
+                background: autoRefresh ? 'rgba(0, 255, 136, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                border: `1px solid ${autoRefresh ? 'rgba(0, 255, 136, 0.3)' : 'rgba(255, 255, 255, 0.1)'}`,
+                borderRadius: '6px',
+                color: autoRefresh ? '#00ff88' : 'rgba(255,255,255,0.5)',
+                cursor: 'pointer',
+                fontSize: '10px',
+                fontFamily: 'inherit',
+              }}
+            >
+              {autoRefresh ? '⏸ Auto' : '▶ Auto'}
+            </button>
+            <button onClick={refreshAll} disabled={isAnyLoading} style={{ padding: '6px 10px', background: 'rgba(0, 212, 255, 0.1)', border: '1px solid rgba(0, 212, 255, 0.2)', borderRadius: '6px', color: '#00d4ff', cursor: isAnyLoading ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontFamily: 'inherit' }}>
+              <RefreshIcon spinning={isAnyLoading} />
+            </button>
+          </div>
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
@@ -689,24 +825,45 @@ export default function PolymarketWalletTracker() {
               {/* Overview Tab */}
               {activeTab === 'overview' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                  {/* P&L Summary */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px' }}>
-                    <div style={{ padding: '20px', background: 'rgba(0,0,0,0.3)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                      <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', marginBottom: '8px' }}>REALIZED P&L</div>
-                      <div style={{ fontSize: '24px', fontWeight: '700', color: selectedData.stats.totalRealizedPnl >= 0 ? '#00ff88' : '#ff6b6b' }}>
-                        {selectedData.stats.totalRealizedPnl >= 0 ? '+' : ''}{formatUSD(selectedData.stats.totalRealizedPnl)}
-                      </div>
-                    </div>
-                    <div style={{ padding: '20px', background: 'rgba(0,0,0,0.3)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                      <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', marginBottom: '8px' }}>UNREALIZED P&L</div>
-                      <div style={{ fontSize: '24px', fontWeight: '700', color: selectedData.stats.totalUnrealizedPnl >= 0 ? '#00ff88' : '#ff6b6b' }}>
-                        {selectedData.stats.totalUnrealizedPnl >= 0 ? '+' : ''}{formatUSD(selectedData.stats.totalUnrealizedPnl)}
-                      </div>
-                    </div>
-                    <div style={{ padding: '20px', background: 'rgba(0,0,0,0.3)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
-                      <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', marginBottom: '8px' }}>CURRENT PORTFOLIO</div>
-                      <div style={{ fontSize: '24px', fontWeight: '700', color: '#00d4ff' }}>
+                  {/* P&L Summary with Time Period Tabs - Like Polymarket */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }}>
+                    <div style={{ padding: '24px', background: 'rgba(0,0,0,0.3)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', marginBottom: '8px' }}>PORTFOLIO VALUE</div>
+                      <div style={{ fontSize: '32px', fontWeight: '700', color: '#00d4ff' }}>
                         {formatUSD(selectedData.stats.currentValue)}
+                      </div>
+                    </div>
+                    <div style={{ padding: '24px', background: 'rgba(0,0,0,0.3)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>PROFIT/LOSS</div>
+                        <div style={{ display: 'flex', gap: '4px' }}>
+                          {['1d', '1w', '1m', 'all'].map(period => (
+                            <button
+                              key={period}
+                              onClick={() => setPnlPeriod(period)}
+                              style={{
+                                padding: '4px 8px',
+                                background: pnlPeriod === period ? 'rgba(0, 212, 255, 0.2)' : 'transparent',
+                                border: pnlPeriod === period ? '1px solid rgba(0, 212, 255, 0.4)' : '1px solid rgba(255,255,255,0.1)',
+                                borderRadius: '4px',
+                                color: pnlPeriod === period ? '#00d4ff' : 'rgba(255,255,255,0.5)',
+                                fontSize: '10px',
+                                fontWeight: '600',
+                                cursor: 'pointer',
+                                fontFamily: 'inherit',
+                                textTransform: 'uppercase',
+                              }}
+                            >
+                              {period}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: '32px', fontWeight: '700', color: (pnlPeriod === '1d' ? selectedData.stats.pnl1d : pnlPeriod === '1w' ? selectedData.stats.pnl1w : pnlPeriod === '1m' ? selectedData.stats.pnl1m : selectedData.stats.totalPnl) >= 0 ? '#00ff88' : '#ff6b6b' }}>
+                        {(() => {
+                          const pnl = pnlPeriod === '1d' ? selectedData.stats.pnl1d : pnlPeriod === '1w' ? selectedData.stats.pnl1w : pnlPeriod === '1m' ? selectedData.stats.pnl1m : selectedData.stats.totalPnl;
+                          return `${pnl >= 0 ? '+' : ''}${formatUSD(pnl)}`;
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -767,7 +924,8 @@ export default function PolymarketWalletTracker() {
                               <td style={{ padding: '12px 16px', maxWidth: '250px' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                   <div style={{ color: 'rgba(255,255,255,0.9)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pos.title || 'Unknown'}</div>
-                                  {pos.isRedeemable && <span style={{ padding: '2px 6px', background: 'rgba(0, 255, 136, 0.15)', border: '1px solid rgba(0, 255, 136, 0.3)', borderRadius: '4px', fontSize: '9px', fontWeight: '600', color: '#00ff88', whiteSpace: 'nowrap' }}>WON</span>}
+                                  {pos.currentPrice === 1 && <span style={{ padding: '2px 6px', background: 'rgba(0, 255, 136, 0.15)', border: '1px solid rgba(0, 255, 136, 0.3)', borderRadius: '4px', fontSize: '9px', fontWeight: '600', color: '#00ff88', whiteSpace: 'nowrap' }}>WON</span>}
+                                  {pos.currentPrice === 0 && <span style={{ padding: '2px 6px', background: 'rgba(255, 107, 107, 0.15)', border: '1px solid rgba(255, 107, 107, 0.3)', borderRadius: '4px', fontSize: '9px', fontWeight: '600', color: '#ff6b6b', whiteSpace: 'nowrap' }}>LOST</span>}
                                 </div>
                                 <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>{pos.outcome || ''}</div>
                               </td>
