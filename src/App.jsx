@@ -121,23 +121,40 @@ function analyzePositionPatterns(positions, closedPositions) {
   return sizeRanges.map(r => ({ ...r, pct: (r.count / maxCount) * 100 }));
 }
 
-// Fetch ALL closed positions by paginating until empty
+// Fetch closed positions with pagination (capped to avoid rate limits)
 async function fetchAllClosedPositions(address, signal) {
   let allClosed = [];
   let offset = 0;
+  const maxPositions = 500; // Cap to avoid rate limiting - enough for accurate win rate
 
-  while (true) {
-    const res = await fetch(`${POLYMARKET_API}/closed-positions?user=${address}&limit=100&offset=${offset}`, { signal });
-    if (!res.ok) break;
+  while (offset < maxPositions) {
+    try {
+      const res = await fetch(`${POLYMARKET_API}/closed-positions?user=${address}&limit=50&offset=${offset}`, { signal });
 
-    const data = await res.json();
-    if (!data || data.length === 0) break; // Stop only when empty
+      if (!res.ok) {
+        // If rate limited or error, return what we have
+        if (res.status === 429) {
+          console.warn(`Rate limited fetching closed positions for ${address}, using ${allClosed.length} positions`);
+          break;
+        }
+        break;
+      }
 
-    allClosed = [...allClosed, ...data];
-    offset += data.length;
+      const data = await res.json();
+      if (!data || data.length === 0) break;
 
-    // Safety limit to prevent infinite loops (max 10000 closed positions)
-    if (offset >= 10000) break;
+      allClosed = [...allClosed, ...data];
+      offset += data.length;
+
+      // If we got less than requested, we've reached the end
+      if (data.length < 50) break;
+
+      // Small delay to avoid rate limiting
+      await new Promise(r => setTimeout(r, 100));
+    } catch (err) {
+      console.warn(`Error fetching closed positions at offset ${offset}:`, err);
+      break;
+    }
   }
 
   return allClosed;
@@ -179,6 +196,16 @@ async function fetchTraderData(address) {
     let totalVolume = 0;
     const marketTitles = new Set();
 
+    // Build a map of conditionId -> most recent trade timestamp
+    const positionLastTrade = {};
+    trades.forEach(trade => {
+      const condId = trade.conditionId;
+      const ts = trade.timestamp || 0;
+      if (!positionLastTrade[condId] || ts > positionLastTrade[condId]) {
+        positionLastTrade[condId] = ts;
+      }
+    });
+
     // All positions with size > 0 are OPEN/ACTIVE positions
     const openPositions = [];
 
@@ -203,6 +230,7 @@ async function fetchTraderData(address) {
           pnlPercent,
           entryPrice: pos.avgPrice || 0,
           currentPrice: pos.curPrice || 0,
+          lastTradeTimestamp: positionLastTrade[pos.conditionId] || 0,
         });
       }
     });
@@ -354,6 +382,7 @@ export default function PolymarketWalletTracker() {
   const [error, setError] = useState({});
   const [activeTab, setActiveTab] = useState('overview');
   const [pnlPeriod, setPnlPeriod] = useState('all'); // 1d, 1w, 1m, all
+  const [positionSort, setPositionSort] = useState('recent'); // recent, size, pnl
   const [lastTradeTimestamps, setLastTradeTimestamps] = useState({}); // Track latest trade per wallet
   const [newTrades, setNewTrades] = useState([]); // Track new trades for highlighting
   const [isRefreshing, setIsRefreshing] = useState(false); // For subtle background refresh indicator
@@ -905,6 +934,35 @@ export default function PolymarketWalletTracker() {
               {/* Open Positions Tab */}
               {activeTab === 'positions' && (
                 <div>
+                  {/* Sort Controls */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>{selectedData.positions?.length || 0} positions</span>
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {[
+                        { id: 'recent', label: 'Recent' },
+                        { id: 'size', label: 'Size' },
+                        { id: 'pnl', label: 'P&L' },
+                      ].map(sort => (
+                        <button
+                          key={sort.id}
+                          onClick={() => setPositionSort(sort.id)}
+                          style={{
+                            padding: '4px 10px',
+                            background: positionSort === sort.id ? 'rgba(0, 212, 255, 0.2)' : 'transparent',
+                            border: positionSort === sort.id ? '1px solid rgba(0, 212, 255, 0.4)' : '1px solid rgba(255,255,255,0.1)',
+                            borderRadius: '4px',
+                            color: positionSort === sort.id ? '#00d4ff' : 'rgba(255,255,255,0.5)',
+                            fontSize: '10px',
+                            fontWeight: '500',
+                            cursor: 'pointer',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          {sort.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.06)', overflow: 'hidden' }}>
                     {selectedData.positions?.length > 0 ? (
                       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
@@ -919,15 +977,23 @@ export default function PolymarketWalletTracker() {
                           </tr>
                         </thead>
                         <tbody>
-                          {selectedData.positions.map((pos, i) => (
+                          {[...selectedData.positions].sort((a, b) => {
+                            if (positionSort === 'recent') return (b.lastTradeTimestamp || 0) - (a.lastTradeTimestamp || 0);
+                            if (positionSort === 'size') return Math.abs(b.initialValue || 0) - Math.abs(a.initialValue || 0);
+                            if (positionSort === 'pnl') return (b.unrealizedPnl || 0) - (a.unrealizedPnl || 0);
+                            return 0;
+                          }).map((pos, i) => (
                             <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
-                              <td style={{ padding: '12px 16px', maxWidth: '250px' }}>
+                              <td style={{ padding: '12px 16px', maxWidth: '280px' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                   <div style={{ color: 'rgba(255,255,255,0.9)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{pos.title || 'Unknown'}</div>
                                   {pos.currentPrice === 1 && <span style={{ padding: '2px 6px', background: 'rgba(0, 255, 136, 0.15)', border: '1px solid rgba(0, 255, 136, 0.3)', borderRadius: '4px', fontSize: '9px', fontWeight: '600', color: '#00ff88', whiteSpace: 'nowrap' }}>WON</span>}
                                   {pos.currentPrice === 0 && <span style={{ padding: '2px 6px', background: 'rgba(255, 107, 107, 0.15)', border: '1px solid rgba(255, 107, 107, 0.3)', borderRadius: '4px', fontSize: '9px', fontWeight: '600', color: '#ff6b6b', whiteSpace: 'nowrap' }}>LOST</span>}
                                 </div>
-                                <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>{pos.outcome || ''}</div>
+                                <div style={{ fontSize: '10px', color: 'rgba(255,255,255,0.4)', display: 'flex', gap: '8px' }}>
+                                  <span>{pos.outcome || ''}</span>
+                                  {pos.lastTradeTimestamp > 0 && <span>• {formatTime(pos.lastTradeTimestamp)}</span>}
+                                </div>
                               </td>
                               <td style={{ padding: '12px 16px', textAlign: 'right', color: 'rgba(255,255,255,0.6)' }}>{pos.entryPrice ? `${(pos.entryPrice * 100).toFixed(1)}¢` : '-'}</td>
                               <td style={{ padding: '12px 16px', textAlign: 'right', color: 'rgba(255,255,255,0.6)' }}>{pos.currentPrice ? `${(pos.currentPrice * 100).toFixed(1)}¢` : '-'}</td>
