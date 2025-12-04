@@ -1,4 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { ConnectButton } from '@rainbow-me/rainbowkit';
+import { useAuth } from './context/AuthContext';
+import { useWatchlist } from './hooks/useWatchlist';
+import { UpgradeModal, MigrationModal } from './components/UpgradeModal';
 
 const formatUSD = (amount) => {
   const absAmount = Math.abs(amount);
@@ -74,6 +78,7 @@ const Toast = ({ message, type, onClose }) => (
 );
 
 const POLYMARKET_API = 'https://data-api.polymarket.com';
+const BACKEND_API = 'https://polymarketalphatracker-production.up.railway.app';
 
 // Analyze activity patterns from trades
 function analyzeActivityPatterns(trades) {
@@ -121,299 +126,81 @@ function analyzePositionPatterns(positions, closedPositions) {
   return sizeRanges.map(r => ({ ...r, pct: (r.count / maxCount) * 100 }));
 }
 
-// Fetch closed positions with pagination (capped to avoid rate limits)
-async function fetchAllClosedPositions(address, signal) {
-  let allClosed = [];
-  let offset = 0;
-  const maxPositions = 500; // Cap to avoid rate limiting - enough for accurate win rate
-
-  while (offset < maxPositions) {
-    try {
-      const res = await fetch(`${POLYMARKET_API}/closed-positions?user=${address}&limit=50&offset=${offset}`, { signal });
-
-      if (!res.ok) {
-        // If rate limited or error, return what we have
-        if (res.status === 429) {
-          console.warn(`Rate limited fetching closed positions for ${address}, using ${allClosed.length} positions`);
-          break;
-        }
-        break;
-      }
-
-      const data = await res.json();
-      if (!data || data.length === 0) break;
-
-      allClosed = [...allClosed, ...data];
-      offset += data.length;
-
-      // If we got less than requested, we've reached the end
-      if (data.length < 50) break;
-
-      // Small delay to avoid rate limiting
-      await new Promise(r => setTimeout(r, 100));
-    } catch (err) {
-      console.warn(`Error fetching closed positions at offset ${offset}:`, err);
-      break;
-    }
-  }
-
-  return allClosed;
-}
-
-// Fetch trader data directly from Polymarket Data API
+// Fetch trader data from our backend (handles rate limits & fetches ALL data)
 async function fetchTraderData(address) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout for larger fetches
-
   try {
-    // Fetch positions, trades, and value in parallel
-    const [positionsRes, tradesRes, valueRes] = await Promise.all([
-      fetch(`${POLYMARKET_API}/positions?user=${address}&limit=1000&sizeThreshold=-1`, { signal: controller.signal }),
-      fetch(`${POLYMARKET_API}/trades?user=${address}&limit=2000`, { signal: controller.signal }),
-      fetch(`${POLYMARKET_API}/value?user=${address}`, { signal: controller.signal }),
-    ]);
+    const res = await fetch(`${BACKEND_API}/api/trader/${address}`);
 
-    if (!positionsRes.ok || !tradesRes.ok || !valueRes.ok) {
-      const errorRes = [positionsRes, tradesRes, valueRes].find(r => !r.ok);
-      throw new Error(`API error: ${errorRes.status} ${errorRes.statusText}`);
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.error || `API error: ${res.status}`);
     }
 
-    const [positions, trades, valueData] = await Promise.all([
-      positionsRes.json(),
-      tradesRes.json(),
-      valueRes.json(),
-    ]);
+    const data = await res.json();
 
-    // Fetch ALL closed positions (paginate until we get everything)
-    const closedPositionsRaw = await fetchAllClosedPositions(address, controller.signal);
-
-    clearTimeout(timeoutId);
-
-    // Calculate stats from positions
-    let totalPnl = 0; // Use cashPnl from API - this is the actual profit
-    let wins = 0;
-    let losses = 0;
-    let totalVolume = 0;
-    const marketTitles = new Set();
-
-    // Build a map of conditionId -> most recent trade timestamp
-    const positionLastTrade = {};
-    trades.forEach(trade => {
-      const condId = trade.conditionId;
-      const ts = trade.timestamp || 0;
-      if (!positionLastTrade[condId] || ts > positionLastTrade[condId]) {
-        positionLastTrade[condId] = ts;
-      }
-    });
-
-    // All positions with size > 0 are OPEN/ACTIVE positions
-    const openPositions = [];
-
-    positions.forEach(pos => {
-      const size = pos.size || 0;
-      const initialValue = pos.initialValue || 0;
-      const currentValue = pos.currentValue || 0;
-      const cashPnl = pos.cashPnl || 0; // This is the actual profit from API
-      const pnlPercent = initialValue > 0 ? (cashPnl / initialValue) * 100 : 0;
-
-      totalVolume += Math.abs(pos.totalBought || initialValue || 0);
-
-      if (size > 0.01) {
-        // Active position - use cashPnl for profit
-        totalPnl += cashPnl;
-        if (pos.title) marketTitles.add(pos.title);
-        openPositions.push({
-          ...pos,
-          initialValue,
-          currentValue,
-          unrealizedPnl: cashPnl,
-          pnlPercent,
-          entryPrice: pos.avgPrice || 0,
-          currentPrice: pos.curPrice || 0,
-          lastTradeTimestamp: positionLastTrade[pos.conditionId] || 0,
-        });
-      }
-    });
-
-    // Process closed positions from the /closed-positions endpoint (includes wins AND losses)
-    const closedPositions = [];
-    const seenConditions = new Set();
-
-    closedPositionsRaw.forEach(pos => {
-      // Skip duplicates
-      if (seenConditions.has(pos.conditionId)) return;
-      seenConditions.add(pos.conditionId);
-
-      const curPrice = pos.curPrice || 0;
-      const totalBought = pos.totalBought || 0;
-      const realizedPnl = pos.realizedPnl || 0; // API provides correct P&L
-
-      // curPrice = 1 means WON, curPrice = 0 means LOST
-      const won = curPrice === 1;
-      const lost = curPrice === 0;
-
-      if (won) wins++;
-      else if (lost) losses++;
-
-      // Use API's realizedPnl directly - it's already calculated correctly
-      totalPnl += realizedPnl;
-      totalVolume += totalBought;
-
-      closedPositions.push({
-        title: pos.title || 'Unknown Market',
-        outcome: pos.outcome || '',
-        conditionId: pos.conditionId,
-        totalBought: totalBought,
-        amountWon: won ? (totalBought + realizedPnl) : 0,
-        realizedPnl: realizedPnl, // Use API value directly
-        pnlPercent: totalBought > 0 ? (realizedPnl / totalBought) * 100 : 0,
-        won: won,
-        lost: lost,
-        timestamp: pos.timestamp,
-        avgPrice: pos.avgPrice,
-      });
-    });
-
-    // Sort positions
-    openPositions.sort((a, b) => Math.abs(b.currentValue) - Math.abs(a.currentValue));
-    closedPositions.sort((a, b) => Math.abs(b.amountWon || b.currentValue || 0) - Math.abs(a.amountWon || a.currentValue || 0));
-
-    // Calculate USD value for each trade (size * price) and add to volume
-    const tradesWithUsd = trades.map(trade => {
-      const usdValue = (trade.size || 0) * (trade.price || 0);
-      return { ...trade, usdValue };
-    });
-
-    tradesWithUsd.forEach(trade => {
-      totalVolume += Math.abs(trade.usdValue || 0);
-    });
-
-    const totalPositionCount = openPositions.length + closedPositions.length;
-    const winRate = closedPositions.length > 0 ? ((wins / closedPositions.length) * 100) : 0;
-    // /value endpoint returns an array with a single object
-    const currentValue = Array.isArray(valueData) ? (valueData[0]?.value || 0) : (valueData?.value || 0);
-
-    // Get pseudonym from first position/trade that has it
-    const pseudonym = positions[0]?.pseudonym || trades[0]?.pseudonym || null;
-
-    // Get notable bets (top 5 by position size)
-    const notableBets = [...marketTitles].slice(0, 5);
-
-    // Calculate additional stats
-    const avgPositionSize = totalPositionCount > 0 ? totalVolume / totalPositionCount : 0;
-    const largestTrade = tradesWithUsd.length > 0 ? Math.max(...tradesWithUsd.map(t => Math.abs(t.usdValue || 0))) : 0;
-    const avgTradeSize = tradesWithUsd.length > 0 ? tradesWithUsd.reduce((sum, t) => sum + Math.abs(t.usdValue || 0), 0) / tradesWithUsd.length : 0;
-
-    // Sort trades by timestamp (most recent first)
-    const sortedTrades = [...tradesWithUsd].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-
-    // Activity patterns analysis
-    const activityPatterns = analyzeActivityPatterns(trades);
-
-    // Position sizing patterns
-    const positionPatterns = analyzePositionPatterns(openPositions, closedPositions);
-
-    // Calculate period-based P&L (1D, 1W, 1M, ALL)
-    const now = Math.floor(Date.now() / 1000);
-    const oneDayAgo = now - (1 * 24 * 60 * 60);
-    const oneWeekAgo = now - (7 * 24 * 60 * 60);
-    const oneMonthAgo = now - (30 * 24 * 60 * 60);
-
-    // Calculate P&L from closed positions by time period
-    let pnl1d = 0, pnl1w = 0, pnl1m = 0;
-
-    closedPositions.forEach(pos => {
-      const posTime = pos.timestamp || 0;
-      const pnl = pos.realizedPnl || 0;
-
-      if (posTime >= oneDayAgo) pnl1d += pnl;
-      if (posTime >= oneWeekAgo) pnl1w += pnl;
-      if (posTime >= oneMonthAgo) pnl1m += pnl;
-    });
-
-    // Also add unrealized P&L from open positions for all periods
-    const unrealizedPnl = openPositions.reduce((sum, pos) => sum + (pos.unrealizedPnl || 0), 0);
+    // Add activity patterns analysis (done client-side for now)
+    const activityPatterns = analyzeActivityPatterns(data.trades || []);
+    const positionPatterns = analyzePositionPatterns(data.positions || [], data.closedPositions || []);
 
     return {
-      found: totalPositionCount > 0 || trades.length > 0,
-      pseudonym,
-      totalPnl, // Combined P&L from open positions (cashPnl) + closed positions
-      pnl1d: pnl1d + unrealizedPnl, // 1 day includes current unrealized
-      pnl1w: pnl1w + unrealizedPnl, // 1 week includes current unrealized
-      pnl1m: pnl1m + unrealizedPnl, // 1 month includes current unrealized
-      winRate: parseFloat(winRate.toFixed(1)),
-      totalVolume,
-      currentValue,
-      wins,
-      losses,
-      totalPositions: totalPositionCount,
-      notableBets,
-      trades: sortedTrades,
-      positions: openPositions,
-      closedPositions,
-      closedPositionsRaw, // Keep raw closed positions for timestamp filtering
-      avgPositionSize,
-      largestTrade,
-      avgTradeSize,
-      totalTrades: trades.length,
+      ...data,
       activityPatterns,
       positionPatterns,
-      openPositionCount: openPositions.length,
-      closedPositionCount: closedPositions.length,
       error: null,
     };
   } catch (err) {
-    clearTimeout(timeoutId);
-    if (err.name === 'AbortError') {
-      return { found: false, error: 'Request timed out' };
-    }
+    console.error('Failed to fetch trader data:', err);
     return { found: false, error: err.message || 'Failed to fetch data' };
   }
 }
 
 export default function PolymarketWalletTracker() {
-  const [watchlist, setWatchlist] = useState([]);
+  // Auth
+  const { isAuthenticated, isConnected, user, signIn, tier } = useAuth();
+
+  // Watchlist from hook (server-synced when authenticated)
+  const {
+    watchlist,
+    canAdd,
+    limit,
+    used,
+    hasPendingMigration,
+    addWallet: addWalletToList,
+    removeWallet: removeWalletFromList,
+    updateWallet: updateWalletNickname,
+    migrateFromLocalStorage,
+    skipMigration,
+  } = useWatchlist();
+
   const [selectedWallet, setSelectedWallet] = useState(null);
   const [walletData, setWalletData] = useState({});
   const [newAddress, setNewAddress] = useState('');
   const [loading, setLoading] = useState({});
   const [toast, setToast] = useState(null);
-  const [autoRefresh, setAutoRefresh] = useState(true); // Auto-refresh ON by default
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [error, setError] = useState({});
   const [activeTab, setActiveTab] = useState('overview');
-  const [pnlPeriod, setPnlPeriod] = useState('all'); // 1d, 1w, 1m, all
-  const [positionSort, setPositionSort] = useState('recent'); // recent, size, pnl
-  const [lastTradeTimestamps, setLastTradeTimestamps] = useState({}); // Track latest trade per wallet
-  const [newTrades, setNewTrades] = useState([]); // Track new trades for highlighting
-  const [isRefreshing, setIsRefreshing] = useState(false); // For subtle background refresh indicator
+  const [pnlPeriod, setPnlPeriod] = useState('all');
+  const [positionSort, setPositionSort] = useState('recent');
+  const [lastTradeTimestamps, setLastTradeTimestamps] = useState({});
+  const [newTrades, setNewTrades] = useState([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [showMigrationModal, setShowMigrationModal] = useState(false);
 
-  // Load watchlist from localStorage on mount
+  // Show migration modal when there's pending migration
   useEffect(() => {
-    const saved = localStorage.getItem('polymarket-watchlist');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          setWatchlist(parsed);
-          setSelectedWallet(parsed[0].address);
-          return;
-        }
-      } catch (e) {
-        console.error('Failed to parse saved watchlist:', e);
-      }
+    if (isAuthenticated && hasPendingMigration) {
+      setShowMigrationModal(true);
     }
-    // Default watchlist if nothing saved
-    const defaultWatchlist = [{ address: '0xee50a31c3f5a7c77824b12a941a54388a2827ed6', nickname: 'Tracked Whale' }];
-    setWatchlist(defaultWatchlist);
-    setSelectedWallet(defaultWatchlist[0].address);
-  }, []);
+  }, [isAuthenticated, hasPendingMigration]);
 
-  // Save watchlist to localStorage whenever it changes
+  // Select first wallet when watchlist loads
   useEffect(() => {
-    if (watchlist.length > 0) {
-      localStorage.setItem('polymarket-watchlist', JSON.stringify(watchlist));
+    if (watchlist.length > 0 && !selectedWallet) {
+      setSelectedWallet(watchlist[0].address);
     }
-  }, [watchlist]);
+  }, [watchlist, selectedWallet]);
 
   // isBackground = true means silent refresh (no loading spinner)
   const fetchUserData = useCallback(async (address, isBackground = false) => {
@@ -550,34 +337,53 @@ export default function PolymarketWalletTracker() {
     return () => clearInterval(interval);
   }, [autoRefresh, watchlist, refreshAllBackground]);
 
-  const addWallet = () => {
+  const addWallet = async () => {
     const address = newAddress.trim().toLowerCase();
     if (!address || !address.startsWith('0x') || address.length !== 42) {
       setToast({ message: 'Enter a valid Ethereum address (0x...)', type: 'error' });
       setTimeout(() => setToast(null), 3000);
       return;
     }
-    if (watchlist.some(w => w.address.toLowerCase() === address)) {
+    if (watchlist.some(w => w.address?.toLowerCase() === address)) {
       setToast({ message: 'Wallet already tracked', type: 'info' });
       setTimeout(() => setToast(null), 3000);
       return;
     }
-    setWatchlist(prev => [...prev, { address, nickname: '' }]);
-    setNewAddress('');
-    setSelectedWallet(address);
-    fetchUserData(address);
-  };
 
-  const removeWallet = (address) => {
-    setWatchlist(prev => prev.filter(w => w.address !== address));
-    if (selectedWallet === address) {
-      const remaining = watchlist.filter(w => w.address !== address);
-      setSelectedWallet(remaining[0]?.address || null);
+    try {
+      await addWalletToList(address);
+      setNewAddress('');
+      setSelectedWallet(address);
+      fetchUserData(address);
+    } catch (err) {
+      if (err.limitReached || err.error === 'LIMIT_REACHED') {
+        setShowUpgradeModal(true);
+      } else {
+        setToast({ message: err.message || 'Failed to add wallet', type: 'error' });
+        setTimeout(() => setToast(null), 3000);
+      }
     }
   };
 
-  const updateNickname = (address, nickname) => {
-    setWatchlist(prev => prev.map(w => w.address === address ? { ...w, nickname } : w));
+  const removeWallet = async (address) => {
+    try {
+      await removeWalletFromList(address);
+      if (selectedWallet === address) {
+        const remaining = watchlist.filter(w => w.address !== address);
+        setSelectedWallet(remaining[0]?.address || null);
+      }
+    } catch (err) {
+      setToast({ message: 'Failed to remove wallet', type: 'error' });
+      setTimeout(() => setToast(null), 3000);
+    }
+  };
+
+  const updateNickname = async (address, nickname) => {
+    try {
+      await updateWalletNickname(address, nickname);
+    } catch (err) {
+      console.error('Failed to update nickname:', err);
+    }
   };
 
   const selectedData = selectedWallet ? walletData[selectedWallet] : null;
@@ -625,18 +431,129 @@ export default function PolymarketWalletTracker() {
         ::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.3); border-radius: 3px; }
       `}</style>
 
+      {/* Modals */}
+      <UpgradeModal
+        isOpen={showUpgradeModal}
+        onClose={() => setShowUpgradeModal(false)}
+        currentCount={used}
+        limit={limit}
+      />
+      <MigrationModal
+        isOpen={showMigrationModal}
+        onMigrate={async () => {
+          await migrateFromLocalStorage();
+          setShowMigrationModal(false);
+          setToast({ message: 'Watchlist imported successfully!', type: 'success' });
+          setTimeout(() => setToast(null), 3000);
+        }}
+        onSkip={() => {
+          skipMigration();
+          setShowMigrationModal(false);
+        }}
+        localCount={hasPendingMigration ? 'your' : 0}
+      />
+
       {/* Sidebar */}
       <div style={{ width: '340px', borderRight: '1px solid rgba(255, 255, 255, 0.08)', display: 'flex', flexDirection: 'column', background: 'rgba(0, 0, 0, 0.2)' }}>
         <div style={{ padding: '24px', borderBottom: '1px solid rgba(255, 255, 255, 0.08)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
-            <div style={{ width: '44px', height: '44px', background: 'linear-gradient(135deg, #00d4ff 0%, #0099cc 100%)', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 20px rgba(0, 212, 255, 0.4)' }}>
-              <WhaleIcon size={26} />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{ width: '44px', height: '44px', background: 'linear-gradient(135deg, #00d4ff 0%, #0099cc 100%)', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 20px rgba(0, 212, 255, 0.4)' }}>
+                <WhaleIcon size={26} />
+              </div>
+              <div>
+                <h1 style={{ fontSize: '18px', fontWeight: '700', fontFamily: "'Space Grotesk', sans-serif", margin: 0 }}>Whale Tracker</h1>
+                <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', margin: 0 }}>POLYMARKET</p>
+              </div>
             </div>
-            <div>
-              <h1 style={{ fontSize: '18px', fontWeight: '700', fontFamily: "'Space Grotesk', sans-serif", margin: 0 }}>Whale Tracker</h1>
-              <p style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)', margin: 0 }}>POLYMARKET</p>
-            </div>
+            {/* Tier badge */}
+            {isAuthenticated && (
+              <span style={{
+                padding: '4px 8px',
+                background: tier === 'dev' ? 'rgba(147, 51, 234, 0.2)' : tier === 'paid' ? 'rgba(0, 255, 136, 0.2)' : 'rgba(255, 255, 255, 0.1)',
+                border: `1px solid ${tier === 'dev' ? 'rgba(147, 51, 234, 0.4)' : tier === 'paid' ? 'rgba(0, 255, 136, 0.3)' : 'rgba(255, 255, 255, 0.2)'}`,
+                borderRadius: '6px',
+                fontSize: '10px',
+                fontWeight: '600',
+                color: tier === 'dev' ? '#a78bfa' : tier === 'paid' ? '#00ff88' : '#888',
+                textTransform: 'uppercase',
+              }}>
+                {tier}
+              </span>
+            )}
           </div>
+
+          {/* Connect Button */}
+          <div style={{ marginBottom: '16px' }}>
+            {!isConnected ? (
+              <ConnectButton.Custom>
+                {({ openConnectModal }) => (
+                  <button
+                    onClick={openConnectModal}
+                    style={{
+                      width: '100%',
+                      padding: '12px',
+                      background: 'linear-gradient(135deg, rgba(147, 51, 234, 0.3), rgba(79, 70, 229, 0.3))',
+                      border: '1px solid rgba(147, 51, 234, 0.4)',
+                      borderRadius: '10px',
+                      color: '#fff',
+                      fontSize: '13px',
+                      fontWeight: '500',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                    }}
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <rect x="3" y="8" width="18" height="12" rx="2" />
+                      <path d="M7 8V6a5 5 0 0 1 10 0v2" />
+                    </svg>
+                    Connect Wallet
+                  </button>
+                )}
+              </ConnectButton.Custom>
+            ) : !isAuthenticated ? (
+              <button
+                onClick={signIn}
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  background: 'linear-gradient(135deg, #00d4ff, #0099cc)',
+                  border: 'none',
+                  borderRadius: '10px',
+                  color: '#000',
+                  fontSize: '13px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                }}
+              >
+                Sign In to Sync
+              </button>
+            ) : (
+              <div style={{
+                padding: '10px 12px',
+                background: 'rgba(0, 255, 136, 0.1)',
+                border: '1px solid rgba(0, 255, 136, 0.2)',
+                borderRadius: '10px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff88' }} />
+                  <span style={{ fontSize: '12px', color: '#00ff88' }}>
+                    {user?.walletAddress?.slice(0, 6)}...{user?.walletAddress?.slice(-4)}
+                  </span>
+                </div>
+                <span style={{ fontSize: '11px', color: '#888' }}>
+                  {used}/{limit === Infinity ? '∞' : limit} wallets
+                </span>
+              </div>
+            )}
+          </div>
+
           <div style={{ display: 'flex', gap: '8px' }}>
             <input type="text" value={newAddress} onChange={(e) => setNewAddress(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addWallet()} placeholder="0x... wallet address" style={{ flex: 1, padding: '12px 14px', background: 'rgba(255, 255, 255, 0.05)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '10px', color: '#fff', fontSize: '12px', fontFamily: 'inherit' }} />
             <button onClick={addWallet} style={{ padding: '12px 14px', background: 'linear-gradient(135deg, #00d4ff 0%, #0099cc 100%)', border: 'none', borderRadius: '10px', color: '#fff', cursor: 'pointer' }}><PlusIcon /></button>

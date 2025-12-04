@@ -1,13 +1,36 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
+const { SiweMessage } = require('siwe');
+const crypto = require('crypto');
+const { PrismaClient } = require('@prisma/client');
 
+const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Config
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'dev-refresh-secret-change-in-production';
+const DEV_WALLETS = (process.env.DEV_WALLETS || '').split(',').filter(Boolean).map(w => w.toLowerCase());
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+// Tier limits
+const TIER_LIMITS = {
+  free: 3,
+  paid: Infinity,
+  dev: Infinity,
+};
+
 // CORS for frontend
-app.use(cors());
+app.use(cors({
+  origin: [FRONTEND_URL, 'http://localhost:5173', 'http://localhost:3000'],
+  credentials: true,
+}));
 app.use(express.json());
+app.use(cookieParser());
 
 const POLYMARKET_API = 'https://data-api.polymarket.com';
 
@@ -32,6 +55,493 @@ function setCache(key, data, ttl = CACHE_TTL) {
 // Rate limiting helper - delay between requests
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
+// ============================================
+// AUTH MIDDLEWARE
+// ============================================
+
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// Optional auth - attaches user if token present, but doesn't require it
+function optionalAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split(' ')[1];
+
+  if (token) {
+    try {
+      req.user = jwt.verify(token, JWT_SECRET);
+    } catch {
+      // Invalid token, continue without user
+    }
+  }
+  next();
+}
+
+// ============================================
+// AUTH ENDPOINTS
+// ============================================
+
+// Generate nonce for SIWE
+app.post('/api/auth/nonce', async (req, res) => {
+  try {
+    const { address } = req.body;
+
+    if (!address || !address.startsWith('0x')) {
+      return res.status(400).json({ error: 'Invalid address' });
+    }
+
+    const nonce = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+    // Clean up old nonces for this address
+    await prisma.authNonce.deleteMany({
+      where: {
+        OR: [
+          { walletAddress: address.toLowerCase() },
+          { expiresAt: { lt: new Date() } },
+        ],
+      },
+    });
+
+    // Create new nonce
+    await prisma.authNonce.create({
+      data: {
+        walletAddress: address.toLowerCase(),
+        nonce,
+        expiresAt,
+      },
+    });
+
+    res.json({ nonce });
+  } catch (err) {
+    console.error('Error generating nonce:', err);
+    res.status(500).json({ error: 'Failed to generate nonce' });
+  }
+});
+
+// Verify SIWE signature and return JWT
+app.post('/api/auth/verify', async (req, res) => {
+  try {
+    const { message, signature } = req.body;
+
+    if (!message || !signature) {
+      return res.status(400).json({ error: 'Missing message or signature' });
+    }
+
+    // Parse and verify SIWE message
+    const siweMessage = new SiweMessage(message);
+    const fields = await siweMessage.verify({ signature });
+
+    if (!fields.success) {
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
+
+    const address = fields.data.address.toLowerCase();
+
+    // Verify nonce
+    const nonceRecord = await prisma.authNonce.findFirst({
+      where: {
+        walletAddress: address,
+        nonce: fields.data.nonce,
+        used: false,
+        expiresAt: { gt: new Date() },
+      },
+    });
+
+    if (!nonceRecord) {
+      return res.status(401).json({ error: 'Invalid or expired nonce' });
+    }
+
+    // Mark nonce as used
+    await prisma.authNonce.update({
+      where: { id: nonceRecord.id },
+      data: { used: true },
+    });
+
+    // Find or create user
+    let user = await prisma.user.findUnique({
+      where: { walletAddress: address },
+    });
+
+    const isDevWallet = DEV_WALLETS.includes(address);
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          walletAddress: address,
+          tier: isDevWallet ? 'dev' : 'free',
+          isDev: isDevWallet,
+        },
+      });
+    } else if (isDevWallet && user.tier !== 'dev') {
+      // Upgrade to dev if wallet is in dev list
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { tier: 'dev', isDev: true },
+      });
+    }
+
+    // Generate tokens
+    const accessToken = jwt.sign(
+      { userId: user.id, walletAddress: user.walletAddress, tier: user.tier },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    const refreshToken = jwt.sign(
+      { userId: user.id },
+      JWT_REFRESH_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Set refresh token as httpOnly cookie
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+
+    res.json({
+      token: accessToken,
+      user: {
+        id: user.id,
+        walletAddress: user.walletAddress,
+        displayName: user.displayName,
+        tier: user.tier,
+        isDev: user.isDev,
+      },
+    });
+  } catch (err) {
+    console.error('Error verifying signature:', err);
+    res.status(500).json({ error: 'Failed to verify signature' });
+  }
+});
+
+// Refresh access token
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const refreshToken = req.cookies.refreshToken;
+
+    if (!refreshToken) {
+      return res.status(401).json({ error: 'No refresh token' });
+    }
+
+    const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.userId },
+    });
+
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    const accessToken = jwt.sign(
+      { userId: user.id, walletAddress: user.walletAddress, tier: user.tier },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    res.json({
+      token: accessToken,
+      user: {
+        id: user.id,
+        walletAddress: user.walletAddress,
+        displayName: user.displayName,
+        tier: user.tier,
+        isDev: user.isDev,
+      },
+    });
+  } catch (err) {
+    console.error('Error refreshing token:', err);
+    res.status(401).json({ error: 'Invalid refresh token' });
+  }
+});
+
+// Logout
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('refreshToken');
+  res.json({ success: true });
+});
+
+// Get current user
+app.get('/api/auth/me', authMiddleware, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+      include: { watchlists: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      id: user.id,
+      walletAddress: user.walletAddress,
+      displayName: user.displayName,
+      tier: user.tier,
+      isDev: user.isDev,
+      watchlistCount: user.watchlists.length,
+      watchlistLimit: TIER_LIMITS[user.tier],
+    });
+  } catch (err) {
+    console.error('Error fetching user:', err);
+    res.status(500).json({ error: 'Failed to fetch user' });
+  }
+});
+
+// ============================================
+// WATCHLIST ENDPOINTS
+// ============================================
+
+// Get user's watchlist
+app.get('/api/watchlist', authMiddleware, async (req, res) => {
+  try {
+    const watchlist = await prisma.watchlistItem.findMany({
+      where: { userId: req.user.userId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const limit = TIER_LIMITS[req.user.tier];
+
+    res.json({
+      watchlist: watchlist.map(item => ({
+        id: item.id,
+        address: item.walletAddress,
+        nickname: item.nickname,
+        createdAt: item.createdAt,
+      })),
+      limit,
+      used: watchlist.length,
+      canAdd: watchlist.length < limit,
+    });
+  } catch (err) {
+    console.error('Error fetching watchlist:', err);
+    res.status(500).json({ error: 'Failed to fetch watchlist' });
+  }
+});
+
+// Add to watchlist
+app.post('/api/watchlist', authMiddleware, async (req, res) => {
+  try {
+    const { walletAddress, nickname } = req.body;
+
+    if (!walletAddress || !walletAddress.startsWith('0x')) {
+      return res.status(400).json({ error: 'Invalid wallet address' });
+    }
+
+    // Check limit
+    const currentCount = await prisma.watchlistItem.count({
+      where: { userId: req.user.userId },
+    });
+
+    const limit = TIER_LIMITS[req.user.tier];
+
+    if (currentCount >= limit) {
+      return res.status(403).json({
+        error: 'LIMIT_REACHED',
+        message: `Free tier is limited to ${limit} wallets. Upgrade to track more.`,
+        limit,
+        used: currentCount,
+      });
+    }
+
+    // Check if already exists
+    const existing = await prisma.watchlistItem.findFirst({
+      where: {
+        userId: req.user.userId,
+        walletAddress: walletAddress.toLowerCase(),
+      },
+    });
+
+    if (existing) {
+      return res.status(400).json({ error: 'Wallet already in watchlist' });
+    }
+
+    const item = await prisma.watchlistItem.create({
+      data: {
+        userId: req.user.userId,
+        walletAddress: walletAddress.toLowerCase(),
+        nickname: nickname || null,
+      },
+    });
+
+    res.json({
+      id: item.id,
+      address: item.walletAddress,
+      nickname: item.nickname,
+      createdAt: item.createdAt,
+    });
+  } catch (err) {
+    console.error('Error adding to watchlist:', err);
+    res.status(500).json({ error: 'Failed to add to watchlist' });
+  }
+});
+
+// Update watchlist item
+app.patch('/api/watchlist/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nickname } = req.body;
+
+    const item = await prisma.watchlistItem.findFirst({
+      where: { id, userId: req.user.userId },
+    });
+
+    if (!item) {
+      return res.status(404).json({ error: 'Watchlist item not found' });
+    }
+
+    const updated = await prisma.watchlistItem.update({
+      where: { id },
+      data: { nickname },
+    });
+
+    res.json({
+      id: updated.id,
+      address: updated.walletAddress,
+      nickname: updated.nickname,
+      createdAt: updated.createdAt,
+    });
+  } catch (err) {
+    console.error('Error updating watchlist:', err);
+    res.status(500).json({ error: 'Failed to update watchlist' });
+  }
+});
+
+// Remove from watchlist
+app.delete('/api/watchlist/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const item = await prisma.watchlistItem.findFirst({
+      where: { id, userId: req.user.userId },
+    });
+
+    if (!item) {
+      return res.status(404).json({ error: 'Watchlist item not found' });
+    }
+
+    await prisma.watchlistItem.delete({ where: { id } });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error removing from watchlist:', err);
+    res.status(500).json({ error: 'Failed to remove from watchlist' });
+  }
+});
+
+// Import watchlist from localStorage
+app.post('/api/watchlist/import', authMiddleware, async (req, res) => {
+  try {
+    const { wallets } = req.body;
+
+    if (!Array.isArray(wallets)) {
+      return res.status(400).json({ error: 'Invalid wallets array' });
+    }
+
+    const currentCount = await prisma.watchlistItem.count({
+      where: { userId: req.user.userId },
+    });
+
+    const limit = TIER_LIMITS[req.user.tier];
+    const available = Math.max(0, limit - currentCount);
+
+    const imported = [];
+    const skipped = [];
+
+    for (const wallet of wallets) {
+      const address = wallet.address?.toLowerCase();
+      if (!address || !address.startsWith('0x')) {
+        skipped.push({ address, reason: 'invalid' });
+        continue;
+      }
+
+      // Check if already exists
+      const existing = await prisma.watchlistItem.findFirst({
+        where: { userId: req.user.userId, walletAddress: address },
+      });
+
+      if (existing) {
+        skipped.push({ address, reason: 'duplicate' });
+        continue;
+      }
+
+      if (imported.length >= available) {
+        skipped.push({ address, reason: 'limit' });
+        continue;
+      }
+
+      const item = await prisma.watchlistItem.create({
+        data: {
+          userId: req.user.userId,
+          walletAddress: address,
+          nickname: wallet.nickname || null,
+        },
+      });
+
+      imported.push({
+        id: item.id,
+        address: item.walletAddress,
+        nickname: item.nickname,
+      });
+    }
+
+    res.json({
+      imported,
+      skipped,
+      importedCount: imported.length,
+      skippedCount: skipped.length,
+      limitReached: skipped.some(s => s.reason === 'limit'),
+    });
+  } catch (err) {
+    console.error('Error importing watchlist:', err);
+    res.status(500).json({ error: 'Failed to import watchlist' });
+  }
+});
+
+// ============================================
+// SUBSCRIPTION ENDPOINTS
+// ============================================
+
+app.get('/api/subscription', authMiddleware, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.userId },
+      include: { watchlists: true },
+    });
+
+    res.json({
+      tier: user.tier,
+      isDev: user.isDev,
+      watchlistLimit: TIER_LIMITS[user.tier],
+      watchlistUsed: user.watchlists.length,
+    });
+  } catch (err) {
+    console.error('Error fetching subscription:', err);
+    res.status(500).json({ error: 'Failed to fetch subscription' });
+  }
+});
+
+// ============================================
+// POLYMARKET DATA ENDPOINTS
+// ============================================
+
 // Fetch all closed positions with proper pagination
 async function fetchAllClosedPositions(address) {
   const cacheKey = `closed-${address}`;
@@ -48,7 +558,6 @@ async function fetchAllClosedPositions(address) {
 
       if (!res.ok) {
         if (res.status === 429) {
-          // Rate limited - wait and retry
           console.log(`Rate limited at offset ${offset}, waiting...`);
           await delay(2000);
           continue;
@@ -66,7 +575,6 @@ async function fetchAllClosedPositions(address) {
 
       if (data.length < limit) break;
 
-      // Delay between requests to avoid rate limiting
       await delay(150);
     } catch (err) {
       console.error(`Error fetching closed positions:`, err.message);
@@ -74,7 +582,6 @@ async function fetchAllClosedPositions(address) {
     }
   }
 
-  // Cache for 5 minutes (closed positions don't change often)
   setCache(cacheKey, allClosed, 5 * 60 * 1000);
   return allClosed;
 }
@@ -97,7 +604,6 @@ app.get('/api/trader/:address', async (req, res) => {
   try {
     console.log(`Fetching data for ${address.slice(0, 8)}...`);
 
-    // Fetch positions, trades, and value in parallel
     const [positionsRes, tradesRes, valueRes] = await Promise.all([
       fetch(`${POLYMARKET_API}/positions?user=${address}&limit=1000&sizeThreshold=-1`),
       fetch(`${POLYMARKET_API}/trades?user=${address}&limit=2000`),
@@ -114,10 +620,8 @@ app.get('/api/trader/:address', async (req, res) => {
       valueRes.json(),
     ]);
 
-    // Fetch ALL closed positions (this is the heavy one)
     const closedPositionsRaw = await fetchAllClosedPositions(address);
 
-    // Build position -> last trade timestamp map
     const positionLastTrade = {};
     trades.forEach(trade => {
       const condId = trade.conditionId;
@@ -127,7 +631,6 @@ app.get('/api/trader/:address', async (req, res) => {
       }
     });
 
-    // Process positions
     let totalPnl = 0;
     let wins = 0;
     let losses = 0;
@@ -160,7 +663,6 @@ app.get('/api/trader/:address', async (req, res) => {
       }
     });
 
-    // Process closed positions
     const closedPositions = [];
     const seenConditions = new Set();
 
@@ -196,7 +698,6 @@ app.get('/api/trader/:address', async (req, res) => {
       });
     });
 
-    // Calculate period P&L
     const now = Math.floor(Date.now() / 1000);
     const oneDayAgo = now - (1 * 24 * 60 * 60);
     const oneWeekAgo = now - (7 * 24 * 60 * 60);
@@ -213,7 +714,6 @@ app.get('/api/trader/:address', async (req, res) => {
 
     const unrealizedPnl = openPositions.reduce((sum, pos) => sum + (pos.unrealizedPnl || 0), 0);
 
-    // Calculate trade stats
     const tradesWithUsd = trades.map(trade => ({
       ...trade,
       usdValue: (trade.size || 0) * (trade.price || 0),
@@ -256,7 +756,6 @@ app.get('/api/trader/:address', async (req, res) => {
       closedPositionCount: closedPositions.length,
     };
 
-    // Cache for 1 minute
     setCache(cacheKey, result);
 
     res.json(result);
@@ -271,6 +770,13 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', cached: cache.size });
 });
 
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing connections...');
+  await prisma.$disconnect();
+  process.exit(0);
+});
+
 app.listen(PORT, () => {
-  console.log(`🚀 Polymarket Tracker API running on port ${PORT}`);
+  console.log(`Polymarket Tracker API running on port ${PORT}`);
 });

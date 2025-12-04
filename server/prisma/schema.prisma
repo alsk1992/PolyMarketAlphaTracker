@@ -1,0 +1,48 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String          @id @default(uuid())
+  walletAddress String          @unique @map("wallet_address") @db.VarChar(42)
+  displayName   String?         @map("display_name") @db.VarChar(100)
+  tier          String          @default("free") @db.VarChar(20)
+  isDev         Boolean         @default(false) @map("is_dev")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  watchlists WatchlistItem[]
+
+  @@map("users")
+}
+
+model WatchlistItem {
+  id            String   @id @default(uuid())
+  userId        String   @map("user_id")
+  walletAddress String   @map("wallet_address") @db.VarChar(42)
+  nickname      String?  @db.VarChar(100)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, walletAddress])
+  @@map("watchlists")
+}
+
+model AuthNonce {
+  id            String   @id @default(uuid())
+  walletAddress String   @map("wallet_address") @db.VarChar(42)
+  nonce         String   @unique @db.VarChar(64)
+  expiresAt     DateTime @map("expires_at")
+  used          Boolean  @default(false)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([walletAddress])
+  @@index([expiresAt])
+  @@map("auth_nonces")
+}
