@@ -90,6 +90,12 @@ npm run build
 
 This is a tool for tracking publicly available on-chain data. Not financial advice. DYOR. Trade at your own risk.
 
+## Collab
+
+Got ideas? Want to build something together? Hit me up.
+
+[![Telegram](https://img.shields.io/badge/Telegram-@ALSK181-blue?logo=telegram)](https://t.me/ALSK181)
+
 ## License
 
 MIT
