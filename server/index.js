@@ -26,7 +26,13 @@ const TIER_LIMITS = {
 
 // CORS for frontend
 app.use(cors({
-  origin: [FRONTEND_URL, 'http://localhost:5173', 'http://localhost:3000'],
+  origin: [
+    FRONTEND_URL,
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'https://poly-sooty.vercel.app',
+    /\.vercel\.app$/,  // Allow all vercel.app subdomains
+  ],
   credentials: true,
 }));
 app.use(express.json());
