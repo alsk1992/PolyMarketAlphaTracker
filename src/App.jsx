@@ -418,7 +418,7 @@ export default function PolymarketWalletTracker() {
   }
 
   return (
-    <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #080b12 0%, #0c1018 50%, #0a0f1a 100%)', color: '#e8eef7', fontFamily: "'JetBrains Mono', 'SF Mono', monospace", display: 'flex' }}>
+    <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #080b12 0%, #0c1018 50%, #0a0f1a 100%)', color: '#e8eef7', fontFamily: "'JetBrains Mono', 'SF Mono', monospace", display: 'flex', flexDirection: 'column' }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -436,6 +436,57 @@ export default function PolymarketWalletTracker() {
         ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.02); }
         ::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.3); border-radius: 3px; }
       `}</style>
+
+      {/* Connect Wallet Header - Only shown when signed out */}
+      {!isConnected && (
+        <div style={{
+          padding: '10px 24px',
+          background: 'linear-gradient(90deg, rgba(147, 51, 234, 0.15), rgba(79, 70, 229, 0.1))',
+          borderBottom: '1px solid rgba(147, 51, 234, 0.2)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(167, 139, 250, 0.8)" strokeWidth="2">
+              <rect x="3" y="8" width="18" height="12" rx="2" />
+              <path d="M7 8V6a5 5 0 0 1 10 0v2" />
+            </svg>
+            <span style={{ fontSize: '13px', color: 'rgba(255,255,255,0.7)' }}>
+              Connect your wallet to sync your watchlist across devices
+            </span>
+          </div>
+          <button
+            onClick={openLogin}
+            style={{
+              padding: '8px 16px',
+              background: 'linear-gradient(135deg, rgba(147, 51, 234, 0.4), rgba(79, 70, 229, 0.4))',
+              border: '1px solid rgba(147, 51, 234, 0.5)',
+              borderRadius: '8px',
+              color: '#fff',
+              fontSize: '12px',
+              fontWeight: '500',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              transition: 'all 0.2s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(147, 51, 234, 0.6), rgba(79, 70, 229, 0.6))';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(135deg, rgba(147, 51, 234, 0.4), rgba(79, 70, 229, 0.4))';
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="8" width="18" height="12" rx="2" />
+              <path d="M7 8V6a5 5 0 0 1 10 0v2" />
+            </svg>
+            Connect Wallet
+          </button>
+        </div>
+      )}
 
       {/* Modals */}
       <UpgradeModal
@@ -460,6 +511,8 @@ export default function PolymarketWalletTracker() {
         localCount={hasPendingMigration ? 'your' : 0}
       />
 
+      {/* Main Layout Container */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
       {/* Sidebar */}
       <div style={{ width: '340px', borderRight: '1px solid rgba(255, 255, 255, 0.08)', display: 'flex', flexDirection: 'column', background: 'rgba(0, 0, 0, 0.2)' }}>
         <div style={{ padding: '24px', borderBottom: '1px solid rgba(255, 255, 255, 0.08)' }}>
@@ -494,34 +547,10 @@ export default function PolymarketWalletTracker() {
             )}
           </div>
 
-          {/* Connect Button */}
+          {/* User Status - Only shown when connected */}
+          {isConnected && (
           <div style={{ marginBottom: '16px' }}>
-            {!isConnected ? (
-              <button
-                onClick={openLogin}
-                style={{
-                  width: '100%',
-                  padding: '12px',
-                  background: 'linear-gradient(135deg, rgba(147, 51, 234, 0.3), rgba(79, 70, 229, 0.3))',
-                  border: '1px solid rgba(147, 51, 234, 0.4)',
-                  borderRadius: '10px',
-                  color: '#fff',
-                  fontSize: '13px',
-                  fontWeight: '500',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '8px',
-                }}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <rect x="3" y="8" width="18" height="12" rx="2" />
-                  <path d="M7 8V6a5 5 0 0 1 10 0v2" />
-                </svg>
-                Connect Wallet
-              </button>
-            ) : !isAuthenticated ? (
+            {!isAuthenticated ? (
               <button
                 onClick={signIn}
                 style={{
@@ -588,6 +617,7 @@ export default function PolymarketWalletTracker() {
               </>
             )}
           </div>
+          )}
 
           <div style={{ display: 'flex', gap: '8px' }}>
             <input type="text" value={newAddress} onChange={(e) => setNewAddress(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addWallet()} placeholder="0x... wallet address" style={{ flex: 1, padding: '12px 14px', background: 'rgba(255, 255, 255, 0.05)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '10px', color: '#fff', fontSize: '12px', fontFamily: 'inherit' }} />
@@ -1237,6 +1267,7 @@ export default function PolymarketWalletTracker() {
             </div>
           </div>
         )}
+      </div>
       </div>
 
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
