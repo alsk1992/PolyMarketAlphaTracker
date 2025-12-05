@@ -12,27 +12,39 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Get the connected wallet address (ETH or SOL)
+  // Get the connected wallet address (ETH or SOL) - per Privy docs
   const getWalletInfo = useCallback(() => {
-    if (!privyUser?.wallet) return null;
+    if (!privyUser) return null;
 
-    // Check linked accounts for wallet info
-    const linkedWallet = privyUser.linkedAccounts?.find(
+    // Per Privy docs: iterate through linkedAccounts and filter by wallet type
+    // Each wallet account has: type, chainType ('ethereum' | 'solana'), address
+    const linkedWallets = privyUser.linkedAccounts?.filter(
       (account) => account.type === 'wallet'
-    );
+    ) || [];
+
+    // Prefer Solana wallet if available, otherwise use first wallet
+    const solanaWallet = linkedWallets.find(w => w.chainType === 'solana');
+    const ethereumWallet = linkedWallets.find(w => w.chainType === 'ethereum');
+
+    // Use whichever wallet is available (prefer the one they just connected)
+    const linkedWallet = solanaWallet || ethereumWallet || linkedWallets[0];
 
     if (linkedWallet) {
       return {
         address: linkedWallet.address,
-        chainType: linkedWallet.chainType || 'ethereum', // 'ethereum' or 'solana'
+        chainType: linkedWallet.chainType || 'ethereum',
       };
     }
 
-    // Fallback to privy user wallet
-    return {
-      address: privyUser.wallet.address,
-      chainType: privyUser.wallet.chainType || 'ethereum',
-    };
+    // Fallback to user.wallet (first verified wallet per Privy docs)
+    if (privyUser.wallet) {
+      return {
+        address: privyUser.wallet.address,
+        chainType: privyUser.wallet.chainType || 'ethereum',
+      };
+    }
+
+    return null;
   }, [privyUser]);
 
   // Try to restore session on mount or when Privy authenticates
@@ -45,22 +57,37 @@ export function AuthProvider({ children }) {
         return;
       }
 
+      // Wait a tick for Privy user data to populate
+      await new Promise(resolve => setTimeout(resolve, 100));
+
       try {
         // Try to get existing session from backend
         const data = await api.get('/api/auth/me');
         api.setToken(data.token);
         setUser(data);
       } catch {
-        // No valid backend session - need to sign in
-        // Auto sign-in with Privy token
-        await signInWithPrivy();
+        // No valid backend session - auto sign in with Privy
+        const walletInfo = getWalletInfo();
+        if (walletInfo) {
+          try {
+            const { token, user: userData } = await api.post('/api/auth/privy-login', {
+              address: walletInfo.address,
+              chainType: walletInfo.chainType,
+              privyUserId: privyUser?.id,
+            });
+            api.setToken(token);
+            setUser(userData);
+          } catch (err) {
+            console.error('Auto sign-in failed:', err);
+          }
+        }
       } finally {
         setLoading(false);
       }
     };
 
     tryRestoreSession();
-  }, [ready, authenticated]);
+  }, [ready, authenticated, privyUser]);
 
   // Sign in using Privy's authentication
   const signInWithPrivy = useCallback(async () => {

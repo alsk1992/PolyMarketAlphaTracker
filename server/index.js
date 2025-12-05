@@ -289,6 +289,8 @@ app.post('/api/auth/privy-login', async (req, res) => {
   try {
     const { address, chainType, privyUserId } = req.body;
 
+    console.log('Privy login attempt:', { address, chainType, privyUserId });
+
     if (!address) {
       return res.status(400).json({ error: 'Missing address' });
     }
@@ -307,24 +309,32 @@ app.post('/api/auth/privy-login', async (req, res) => {
     });
 
     if (!user) {
-      user = await prisma.user.create({
-        data: {
-          walletAddress: normalizedAddress,
-          tier: isDevWallet ? 'dev' : 'free',
-          isDev: isDevWallet,
-          chainType: chainType || 'ethereum',
-          privyUserId: privyUserId || null,
-        },
-      });
+      // Create with basic fields first (in case DB doesn't have new columns yet)
+      const createData = {
+        walletAddress: normalizedAddress,
+        tier: isDevWallet ? 'dev' : 'free',
+        isDev: isDevWallet,
+      };
+
+      // Try to add optional fields if they exist in schema
+      try {
+        user = await prisma.user.create({
+          data: {
+            ...createData,
+            chainType: chainType || 'ethereum',
+            privyUserId: privyUserId || null,
+          },
+        });
+      } catch (schemaErr) {
+        // Fallback: create without new fields
+        console.log('Creating user without optional fields:', schemaErr.message);
+        user = await prisma.user.create({
+          data: createData,
+        });
+      }
     } else {
       // Update user with Privy ID if not set, and upgrade to dev if needed
       const updates = {};
-      if (privyUserId && !user.privyUserId) {
-        updates.privyUserId = privyUserId;
-      }
-      if (chainType && !user.chainType) {
-        updates.chainType = chainType;
-      }
       if (isDevWallet && user.tier !== 'dev') {
         updates.tier = 'dev';
         updates.isDev = true;
