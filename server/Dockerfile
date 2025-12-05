@@ -46,4 +46,4 @@ COPY index.js ./
 EXPOSE 8080
 
 # Run migrations then start
-CMD ["sh", "-c", "node scripts/deploy.js && node index.js"]
+CMD node scripts/deploy.js && node index.js
