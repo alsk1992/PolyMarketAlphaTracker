@@ -2,9 +2,10 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { PrivyProvider } from '@privy-io/react-auth'
 
-import { PRIVY_APP_ID, privyConfig } from './lib/privy'
 import { AuthProvider } from './context/AuthContext'
 import App from './App.jsx'
+
+const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID || '';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -15,11 +16,21 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         appearance: {
           theme: 'dark',
           accentColor: '#00ffff',
-          showWalletLoginFirst: true,
+          logo: 'https://polymarket.com/favicon.ico',
         },
-        walletConnectCloudProjectId: import.meta.env.VITE_WALLETCONNECT_PROJECT_ID,
         embeddedWallets: {
           createOnLogin: 'off',
+        },
+        // Enable Solana
+        supportedChains: [
+          { id: 1, name: 'Ethereum', network: 'mainnet' },
+          { id: 137, name: 'Polygon', network: 'polygon' },
+        ],
+        // Solana support
+        externalWallets: {
+          solana: {
+            enabled: true,
+          },
         },
       }}
     >
