@@ -42,8 +42,10 @@ RUN npx prisma generate
 # Copy application code
 COPY scripts ./scripts/
 COPY index.js ./
+COPY start.sh ./
+RUN chmod +x start.sh
 
 EXPOSE 8080
 
 # Run migrations then start
-CMD node scripts/deploy.js && node index.js
+CMD ["./start.sh"]
