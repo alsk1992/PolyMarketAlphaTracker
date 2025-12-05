@@ -17,6 +17,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(
           theme: 'dark',
           accentColor: '#00ffff',
         },
+        // Enable Solana wallets
+        solanaClusters: [
+          { name: 'mainnet-beta' }
+        ],
       }}
     >
       <AuthProvider>
