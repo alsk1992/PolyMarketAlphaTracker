@@ -9,12 +9,10 @@ datasource db {
 
 model User {
   id            String          @id @default(uuid())
-  walletAddress String          @unique @map("wallet_address") @db.VarChar(64) // Increased for SOL addresses
+  walletAddress String          @unique @map("wallet_address") @db.VarChar(64)
   displayName   String?         @map("display_name") @db.VarChar(100)
   tier          String          @default("free") @db.VarChar(20)
   isDev         Boolean         @default(false) @map("is_dev")
-  chainType     String?         @map("chain_type") @db.VarChar(20) // 'ethereum' or 'solana'
-  privyUserId   String?         @map("privy_user_id") @db.VarChar(100)
   createdAt     DateTime        @default(now()) @map("created_at")
   updatedAt     DateTime        @updatedAt @map("updated_at")
 
