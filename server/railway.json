@@ -1,11 +1,7 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
-  "build": {
-    "buildCommand": "npm run build"
-  },
   "deploy": {
-    "preDeployCommand": "node scripts/deploy.js",
-    "startCommand": "npm start",
+    "startCommand": "node scripts/deploy.js && node index.js",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
