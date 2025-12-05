@@ -17,10 +17,16 @@ ReactDOM.createRoot(document.getElementById('root')).render(
           theme: 'dark',
           accentColor: '#00ffff',
         },
-        // Enable Solana wallets
+        // Solana config
         solanaClusters: [
           { name: 'mainnet-beta' }
         ],
+        // Force browser extension wallets, not mobile deep links
+        externalWallets: {
+          solana: {
+            connectors: (connectors) => connectors,
+          },
+        },
       }}
     >
       <AuthProvider>
