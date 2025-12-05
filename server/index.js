@@ -287,9 +287,9 @@ app.post('/api/auth/logout', (req, res) => {
 // Privy login - simplified auth since Privy verifies wallet ownership
 app.post('/api/auth/privy-login', async (req, res) => {
   try {
-    const { address, chainType, privyUserId } = req.body;
+    const { address, chainType } = req.body;
 
-    console.log('Privy login attempt:', { address, chainType, privyUserId });
+    console.log('Privy login attempt:', { address, chainType });
 
     if (!address) {
       return res.status(400).json({ error: 'Missing address' });
@@ -314,38 +314,22 @@ app.post('/api/auth/privy-login', async (req, res) => {
           walletAddress: normalizedAddress,
           tier: isDevWallet ? 'dev' : 'free',
           isDev: isDevWallet,
-          chainType: chainType || 'ethereum',
-          privyUserId: privyUserId || null,
         },
       });
-    } else {
-      // Update user with new fields if needed
-      const updates = {};
-      if (isDevWallet && user.tier !== 'dev') {
-        updates.tier = 'dev';
-        updates.isDev = true;
-      }
-      if (chainType && !user.chainType) {
-        updates.chainType = chainType;
-      }
-      if (privyUserId && !user.privyUserId) {
-        updates.privyUserId = privyUserId;
-      }
-      if (Object.keys(updates).length > 0) {
-        user = await prisma.user.update({
-          where: { id: user.id },
-          data: updates,
-        });
-      }
+    } else if (isDevWallet && user.tier !== 'dev') {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { tier: 'dev', isDev: true },
+      });
     }
 
-    // Generate tokens
+    // Generate tokens - chainType stored in JWT, not DB
     const accessToken = jwt.sign(
       {
         userId: user.id,
         walletAddress: user.walletAddress,
         tier: user.tier,
-        chainType: user.chainType || chainType || 'ethereum',
+        chainType: chainType || 'ethereum',
       },
       JWT_SECRET,
       { expiresIn: '15m' }
@@ -373,7 +357,7 @@ app.post('/api/auth/privy-login', async (req, res) => {
         displayName: user.displayName,
         tier: user.tier,
         isDev: user.isDev,
-        chainType: user.chainType || chainType || 'ethereum',
+        chainType: chainType || 'ethereum',
       },
     });
   } catch (err) {
