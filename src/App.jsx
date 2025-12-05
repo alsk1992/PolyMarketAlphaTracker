@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAuth } from './context/AuthContext';
 import { useWatchlist } from './hooks/useWatchlist';
 import { UpgradeModal, MigrationModal } from './components/UpgradeModal';
@@ -157,7 +156,7 @@ async function fetchTraderData(address) {
 
 export default function PolymarketWalletTracker() {
   // Auth
-  const { isAuthenticated, isConnected, user, signIn, tier } = useAuth();
+  const { isAuthenticated, isConnected, user, signIn, openLogin, tier, chainType } = useAuth();
 
   // Watchlist from hook (server-synced when authenticated)
   const {
@@ -498,34 +497,30 @@ export default function PolymarketWalletTracker() {
           {/* Connect Button */}
           <div style={{ marginBottom: '16px' }}>
             {!isConnected ? (
-              <ConnectButton.Custom>
-                {({ openConnectModal }) => (
-                  <button
-                    onClick={openConnectModal}
-                    style={{
-                      width: '100%',
-                      padding: '12px',
-                      background: 'linear-gradient(135deg, rgba(147, 51, 234, 0.3), rgba(79, 70, 229, 0.3))',
-                      border: '1px solid rgba(147, 51, 234, 0.4)',
-                      borderRadius: '10px',
-                      color: '#fff',
-                      fontSize: '13px',
-                      fontWeight: '500',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px',
-                    }}
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <rect x="3" y="8" width="18" height="12" rx="2" />
-                      <path d="M7 8V6a5 5 0 0 1 10 0v2" />
-                    </svg>
-                    Connect Wallet
-                  </button>
-                )}
-              </ConnectButton.Custom>
+              <button
+                onClick={openLogin}
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  background: 'linear-gradient(135deg, rgba(147, 51, 234, 0.3), rgba(79, 70, 229, 0.3))',
+                  border: '1px solid rgba(147, 51, 234, 0.4)',
+                  borderRadius: '10px',
+                  color: '#fff',
+                  fontSize: '13px',
+                  fontWeight: '500',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="8" width="18" height="12" rx="2" />
+                  <path d="M7 8V6a5 5 0 0 1 10 0v2" />
+                </svg>
+                Connect Wallet
+              </button>
             ) : !isAuthenticated ? (
               <button
                 onClick={signIn}

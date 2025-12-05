@@ -1,30 +1,31 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { WagmiProvider } from 'wagmi'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { RainbowKitProvider, darkTheme } from '@rainbow-me/rainbowkit'
-import '@rainbow-me/rainbowkit/styles.css'
+import { PrivyProvider } from '@privy-io/react-auth'
 
-import { config } from './lib/wagmi'
+import { PRIVY_APP_ID, privyConfig } from './lib/privy'
 import { AuthProvider } from './context/AuthContext'
 import App from './App.jsx'
 
-const queryClient = new QueryClient()
-
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={queryClient}>
-        <RainbowKitProvider theme={darkTheme({
+    <PrivyProvider
+      appId={PRIVY_APP_ID}
+      config={{
+        loginMethods: ['wallet', 'email'],
+        appearance: {
+          theme: 'dark',
           accentColor: '#00ffff',
-          accentColorForeground: '#000',
-          borderRadius: 'medium',
-        })}>
-          <AuthProvider>
-            <App />
-          </AuthProvider>
-        </RainbowKitProvider>
-      </QueryClientProvider>
-    </WagmiProvider>
+          showWalletLoginFirst: true,
+        },
+        walletConnectCloudProjectId: import.meta.env.VITE_WALLETCONNECT_PROJECT_ID,
+        embeddedWallets: {
+          createOnLogin: 'off',
+        },
+      }}
+    >
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </PrivyProvider>
   </React.StrictMode>,
 )

@@ -284,6 +284,102 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
+// Privy login - simplified auth since Privy verifies wallet ownership
+app.post('/api/auth/privy-login', async (req, res) => {
+  try {
+    const { address, chainType, privyUserId } = req.body;
+
+    if (!address) {
+      return res.status(400).json({ error: 'Missing address' });
+    }
+
+    // Normalize address - SOL addresses are base58, ETH are hex
+    const normalizedAddress = chainType === 'solana'
+      ? address  // SOL addresses are case-sensitive
+      : address.toLowerCase();
+
+    // Check if dev wallet (support both ETH and SOL dev wallets)
+    const isDevWallet = DEV_WALLETS.includes(normalizedAddress.toLowerCase());
+
+    // Find or create user
+    let user = await prisma.user.findUnique({
+      where: { walletAddress: normalizedAddress },
+    });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          walletAddress: normalizedAddress,
+          tier: isDevWallet ? 'dev' : 'free',
+          isDev: isDevWallet,
+          chainType: chainType || 'ethereum',
+          privyUserId: privyUserId || null,
+        },
+      });
+    } else {
+      // Update user with Privy ID if not set, and upgrade to dev if needed
+      const updates = {};
+      if (privyUserId && !user.privyUserId) {
+        updates.privyUserId = privyUserId;
+      }
+      if (chainType && !user.chainType) {
+        updates.chainType = chainType;
+      }
+      if (isDevWallet && user.tier !== 'dev') {
+        updates.tier = 'dev';
+        updates.isDev = true;
+      }
+      if (Object.keys(updates).length > 0) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: updates,
+        });
+      }
+    }
+
+    // Generate tokens
+    const accessToken = jwt.sign(
+      {
+        userId: user.id,
+        walletAddress: user.walletAddress,
+        tier: user.tier,
+        chainType: user.chainType || chainType || 'ethereum',
+      },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    const refreshToken = jwt.sign(
+      { userId: user.id },
+      JWT_REFRESH_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    // Set refresh token as httpOnly cookie
+    res.cookie('refreshToken', refreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+
+    res.json({
+      token: accessToken,
+      user: {
+        id: user.id,
+        walletAddress: user.walletAddress,
+        displayName: user.displayName,
+        tier: user.tier,
+        isDev: user.isDev,
+        chainType: user.chainType || chainType || 'ethereum',
+      },
+    });
+  } catch (err) {
+    console.error('Error with Privy login:', err);
+    res.status(500).json({ error: 'Failed to authenticate' });
+  }
+});
+
 // Get current user
 app.get('/api/auth/me', authMiddleware, async (req, res) => {
   try {

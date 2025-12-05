@@ -1,73 +1,87 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { useAccount, useSignMessage, useDisconnect } from 'wagmi';
-import { SiweMessage } from 'siwe';
+import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { api } from '../lib/api';
 
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const { address, isConnected, chain } = useAccount();
-  const { signMessageAsync } = useSignMessage();
-  const { disconnect } = useDisconnect();
+  const { ready, authenticated, user: privyUser, login, logout: privyLogout } = usePrivy();
+  const { wallets } = useWallets();
 
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Try to restore session on mount
+  // Get the connected wallet address (ETH or SOL)
+  const getWalletInfo = useCallback(() => {
+    if (!privyUser?.wallet) return null;
+
+    // Check linked accounts for wallet info
+    const linkedWallet = privyUser.linkedAccounts?.find(
+      (account) => account.type === 'wallet'
+    );
+
+    if (linkedWallet) {
+      return {
+        address: linkedWallet.address,
+        chainType: linkedWallet.chainType || 'ethereum', // 'ethereum' or 'solana'
+      };
+    }
+
+    // Fallback to privy user wallet
+    return {
+      address: privyUser.wallet.address,
+      chainType: privyUser.wallet.chainType || 'ethereum',
+    };
+  }, [privyUser]);
+
+  // Try to restore session on mount or when Privy authenticates
   useEffect(() => {
-    const tryRefresh = async () => {
+    if (!ready) return;
+
+    const tryRestoreSession = async () => {
+      if (!authenticated) {
+        setLoading(false);
+        return;
+      }
+
       try {
+        // Try to get existing session from backend
         const data = await api.get('/api/auth/me');
         api.setToken(data.token);
         setUser(data);
       } catch {
-        // No valid session
+        // No valid backend session - need to sign in
+        // Auto sign-in with Privy token
+        await signInWithPrivy();
       } finally {
         setLoading(false);
       }
     };
 
-    // Try refresh if we might have a session
-    tryRefresh();
-  }, []);
+    tryRestoreSession();
+  }, [ready, authenticated]);
 
-  // Sign in with Ethereum
-  const signIn = useCallback(async () => {
-    if (!address || !isConnected) {
-      throw new Error('Wallet not connected');
+  // Sign in using Privy's authentication
+  const signInWithPrivy = useCallback(async () => {
+    const walletInfo = getWalletInfo();
+    if (!walletInfo) {
+      throw new Error('No wallet connected');
     }
 
     setLoading(true);
     setError(null);
 
     try {
-      // 1. Get nonce from server
-      const { nonce } = await api.post('/api/auth/nonce', { address });
+      // For Privy, we use a simpler auth flow since Privy handles the wallet verification
+      // We just need to register/login the user with our backend using their wallet address
 
-      // 2. Create SIWE message
-      const message = new SiweMessage({
-        domain: window.location.host,
-        address,
-        statement: 'Sign in to Polymarket Alpha Tracker',
-        uri: window.location.origin,
-        version: '1',
-        chainId: chain?.id || 1,
-        nonce,
+      const { token, user: userData } = await api.post('/api/auth/privy-login', {
+        address: walletInfo.address,
+        chainType: walletInfo.chainType,
+        privyUserId: privyUser?.id,
       });
 
-      const messageString = message.prepareMessage();
-
-      // 3. Sign message with wallet
-      const signature = await signMessageAsync({ message: messageString });
-
-      // 4. Verify with backend
-      const { token, user: userData } = await api.post('/api/auth/verify', {
-        message: messageString,
-        signature,
-      });
-
-      // 5. Store token and user
       api.setToken(token);
       setUser(userData);
 
@@ -79,7 +93,12 @@ export function AuthProvider({ children }) {
     } finally {
       setLoading(false);
     }
-  }, [address, isConnected, chain, signMessageAsync]);
+  }, [getWalletInfo, privyUser]);
+
+  // Open Privy login modal
+  const openLogin = useCallback(() => {
+    login();
+  }, [login]);
 
   // Sign out
   const signOut = useCallback(async () => {
@@ -90,35 +109,40 @@ export function AuthProvider({ children }) {
     }
     api.clearToken();
     setUser(null);
-    disconnect();
-  }, [disconnect]);
+    await privyLogout();
+  }, [privyLogout]);
 
-  // Check if user needs to sign in after connecting wallet
+  // When Privy auth state changes, sync with backend
   useEffect(() => {
-    if (isConnected && !user && !loading) {
-      // Wallet connected but not signed in - could auto-prompt or show UI
+    if (ready && authenticated && !user && !loading) {
+      signInWithPrivy().catch(console.error);
     }
-  }, [isConnected, user, loading]);
+  }, [ready, authenticated, user, loading, signInWithPrivy]);
 
-  // Clear user if wallet disconnected
+  // Clear user if logged out from Privy
   useEffect(() => {
-    if (!isConnected && user) {
+    if (ready && !authenticated && user) {
       api.clearToken();
       setUser(null);
     }
-  }, [isConnected, user]);
+  }, [ready, authenticated, user]);
+
+  const walletInfo = getWalletInfo();
 
   const value = {
     user,
     isAuthenticated: !!user,
-    isConnected,
-    address,
-    loading,
+    isConnected: authenticated && !!walletInfo,
+    address: walletInfo?.address,
+    chainType: walletInfo?.chainType,
+    loading: !ready || loading,
     error,
-    signIn,
+    signIn: signInWithPrivy,
     signOut,
+    openLogin,
     tier: user?.tier || 'free',
     isDev: user?.isDev || false,
+    privyUser,
   };
 
   return (
