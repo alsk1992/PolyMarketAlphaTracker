@@ -13,6 +13,8 @@ model User {
   displayName   String?         @map("display_name") @db.VarChar(100)
   tier          String          @default("free") @db.VarChar(20)
   isDev         Boolean         @default(false) @map("is_dev")
+  chainType     String?         @map("chain_type") @db.VarChar(20)
+  privyUserId   String?         @map("privy_user_id") @db.VarChar(100)
   createdAt     DateTime        @default(now()) @map("created_at")
   updatedAt     DateTime        @updatedAt @map("updated_at")
 
