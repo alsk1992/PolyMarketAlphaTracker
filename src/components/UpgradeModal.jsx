@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export function UpgradeModal({ isOpen, onClose, currentCount, limit }) {
+export function UpgradeModal({ isOpen, onClose, onUpgrade, currentCount, limit }) {
   if (!isOpen) return null;
 
   return (
@@ -143,8 +143,8 @@ export function UpgradeModal({ isOpen, onClose, currentCount, limit }) {
           </button>
           <button
             onClick={() => {
-              // TODO: Implement payment flow
-              alert('Payment coming soon! Contact @ALSK181 on Telegram for early access.');
+              onClose();
+              if (onUpgrade) onUpgrade();
             }}
             style={{
               flex: 1,

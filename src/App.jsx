@@ -3,6 +3,7 @@ import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAuth } from './context/AuthContext';
 import { useWatchlist } from './hooks/useWatchlist';
 import { UpgradeModal, MigrationModal } from './components/UpgradeModal';
+import { PricingPage } from './components/PricingPage';
 
 const formatUSD = (amount) => {
   const absAmount = Math.abs(amount);
@@ -187,6 +188,7 @@ export default function PolymarketWalletTracker() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
   const [showMigrationModal, setShowMigrationModal] = useState(false);
+  const [showPricingPage, setShowPricingPage] = useState(false);
 
   // Show migration modal when there's pending migration
   useEffect(() => {
@@ -411,6 +413,11 @@ export default function PolymarketWalletTracker() {
     return trades.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   }, [walletData, watchlist]);
 
+  // Show pricing page if open
+  if (showPricingPage) {
+    return <PricingPage onClose={() => setShowPricingPage(false)} />;
+  }
+
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #080b12 0%, #0c1018 50%, #0a0f1a 100%)', color: '#e8eef7', fontFamily: "'JetBrains Mono', 'SF Mono', monospace", display: 'flex' }}>
       <style>{`
@@ -435,6 +442,7 @@ export default function PolymarketWalletTracker() {
       <UpgradeModal
         isOpen={showUpgradeModal}
         onClose={() => setShowUpgradeModal(false)}
+        onUpgrade={() => setShowPricingPage(true)}
         currentCount={used}
         limit={limit}
       />
@@ -477,7 +485,11 @@ export default function PolymarketWalletTracker() {
                 fontWeight: '600',
                 color: tier === 'dev' ? '#a78bfa' : tier === 'paid' ? '#00ff88' : '#888',
                 textTransform: 'uppercase',
-              }}>
+                cursor: tier === 'free' ? 'pointer' : 'default',
+              }}
+              onClick={() => tier === 'free' && setShowPricingPage(true)}
+              title={tier === 'free' ? 'Click to upgrade' : ''}
+              >
                 {tier}
               </span>
             )}
@@ -532,25 +544,53 @@ export default function PolymarketWalletTracker() {
                 Sign In to Sync
               </button>
             ) : (
-              <div style={{
-                padding: '10px 12px',
-                background: 'rgba(0, 255, 136, 0.1)',
-                border: '1px solid rgba(0, 255, 136, 0.2)',
-                borderRadius: '10px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff88' }} />
-                  <span style={{ fontSize: '12px', color: '#00ff88' }}>
-                    {user?.walletAddress?.slice(0, 6)}...{user?.walletAddress?.slice(-4)}
+              <>
+                <div style={{
+                  padding: '10px 12px',
+                  background: 'rgba(0, 255, 136, 0.1)',
+                  border: '1px solid rgba(0, 255, 136, 0.2)',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#00ff88' }} />
+                    <span style={{ fontSize: '12px', color: '#00ff88' }}>
+                      {user?.walletAddress?.slice(0, 6)}...{user?.walletAddress?.slice(-4)}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: '11px', color: '#888' }}>
+                    {used}/{limit === Infinity ? '∞' : limit} wallets
                   </span>
                 </div>
-                <span style={{ fontSize: '11px', color: '#888' }}>
-                  {used}/{limit === Infinity ? '∞' : limit} wallets
-                </span>
-              </div>
+                {tier === 'free' && (
+                  <button
+                    onClick={() => setShowPricingPage(true)}
+                    style={{
+                      width: '100%',
+                      marginTop: '8px',
+                      padding: '10px',
+                      background: 'linear-gradient(135deg, rgba(0, 255, 255, 0.15), rgba(0, 200, 200, 0.1))',
+                      border: '1px solid rgba(0, 255, 255, 0.3)',
+                      borderRadius: '8px',
+                      color: '#00ffff',
+                      fontSize: '12px',
+                      fontWeight: '500',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                    </svg>
+                    Upgrade to Pro
+                  </button>
+                )}
+              </>
             )}
           </div>
 
