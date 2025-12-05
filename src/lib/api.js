@@ -1,4 +1,4 @@
-import { API_URL } from './wagmi';
+import { API_URL } from './privy';
 
 class ApiClient {
   constructor() {
